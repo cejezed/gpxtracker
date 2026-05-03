@@ -11,4 +11,5 @@ pnpm-debug.log*
 *.tsbuildinfo
 vercel.json
 dev-server*.log
+dev-server*.err
 imports/

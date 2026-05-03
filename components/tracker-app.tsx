@@ -201,6 +201,7 @@ export function TrackerApp() {
   const [pointError, setPointError] = useState<string | null>(null);
   const [activePanel, setActivePanel] = useState<ActivePanel>("routes");
   const [mobileSheetMode, setMobileSheetMode] = useState<MobileSheetMode>("half");
+  const [mobileLiveOpen, setMobileLiveOpen] = useState(false);
   const [countryFilter, setCountryFilter] = useState<"all" | RouteCountry>("all");
   const [routeTypeFilter, setRouteTypeFilter] = useState<"all" | RouteType>("all");
   const [activeRouteId, setActiveRouteId] = useState<string | null>(null);
@@ -327,6 +328,14 @@ export function TrackerApp() {
 
   function openPanel(panel: ActivePanel) {
     setActivePanel(panel);
+    setMobileLiveOpen(false);
+    if (isMobileViewport() && mobileSheetMode === "compact") {
+      setMobileSheetMode("half");
+    }
+  }
+
+  function toggleMobileLivePanel() {
+    setMobileLiveOpen((current) => !current);
     if (isMobileViewport() && mobileSheetMode === "compact") {
       setMobileSheetMode("half");
     }
@@ -671,7 +680,7 @@ export function TrackerApp() {
         </div>
       </header>
 
-      <aside className={`sidebar sheet-${mobileSheetMode}`}>
+      <aside className={`sidebar sheet-${mobileSheetMode}${mobileLiveOpen ? " mobile-live-open" : ""}`}>
         <div className="mobile-sheet-bar">
           <button
             type="button"
@@ -702,6 +711,14 @@ export function TrackerApp() {
               title="Paneel vergroten"
             >
               <Maximize2 size={16} aria-hidden />
+            </button>
+            <button
+              type="button"
+              className={mobileLiveOpen ? "icon-button mini active" : "icon-button mini"}
+              onClick={toggleMobileLivePanel}
+              title="Groep live"
+            >
+              <Users size={16} aria-hidden />
             </button>
           </div>
         </div>
@@ -743,7 +760,7 @@ export function TrackerApp() {
           </div>
 
           {activePanel === "routes" ? (
-            <>
+            <div className="routes-scroll">
               <label className="search-field">
                 <Search size={16} aria-hidden />
                 <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Zoek route" />
@@ -862,7 +879,7 @@ export function TrackerApp() {
 
               {routeError && <p className="error-text">{routeError}</p>}
               {supabaseRouteError && <p className="error-text">{supabaseRouteError}</p>}
-            </>
+            </div>
           ) : (
             <div className="plan-view">
               <div className="plan-summary">

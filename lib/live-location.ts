@@ -23,6 +23,14 @@ type PresenceState = {
   updatedAt: string;
 };
 
+const MAX_ACCEPTED_ACCURACY_M = 200;
+const MAX_POSITION_AGE_MS = 30_000;
+const GEOLOCATION_OPTIONS: PositionOptions = {
+  enableHighAccuracy: true,
+  maximumAge: 0,
+  timeout: 20_000
+};
+
 function demoPoint(route: GpxRoute | null, offset: number): RoutePoint | null {
   if (!route || route.points.length === 0) return null;
   const index = Math.min(route.points.length - 1, Math.floor(route.points.length * offset));
@@ -71,6 +79,7 @@ export function useLiveLocation({
   const [error, setError] = useState<string | null>(null);
   const [demoEnabled, setDemoEnabled] = useState(false);
   const channelRef = useRef<RealtimeChannel | null>(null);
+  const lastAcceptedLocationRef = useRef<RiderLocation | null>(null);
 
   useEffect(() => {
     if (!supabase) return;
@@ -90,39 +99,69 @@ export function useLiveLocation({
       return;
     }
 
-    const watchId = navigator.geolocation.watchPosition(
-      (position) => {
-        setOwnLocation({
-          userId: user?.id ?? "local-user",
-          name: displayName,
-          lat: position.coords.latitude,
-          lng: position.coords.longitude,
-          speedKmh:
-            typeof position.coords.speed === "number" && position.coords.speed !== null
-              ? Math.max(0, position.coords.speed * 3.6)
-              : undefined,
-          heading:
-            typeof position.coords.heading === "number" && position.coords.heading !== null
-              ? position.coords.heading
-              : undefined,
-          accuracyM:
-            typeof position.coords.accuracy === "number" && Number.isFinite(position.coords.accuracy)
-              ? position.coords.accuracy
-              : undefined,
-          updatedAt: new Date(position.timestamp).toISOString(),
-          color,
-          isSelf: true
-        });
-        setError(null);
-      },
+    const handlePosition = (position: GeolocationPosition) => {
+      const accuracyM =
+        typeof position.coords.accuracy === "number" && Number.isFinite(position.coords.accuracy)
+          ? position.coords.accuracy
+          : undefined;
+      const positionAgeMs = Date.now() - position.timestamp;
+
+      if (positionAgeMs > MAX_POSITION_AGE_MS) {
+        setError("GPS gaf een oude locatie door. Wacht op een nieuwe fix.");
+        return;
+      }
+
+      if (accuracyM !== undefined && accuracyM > MAX_ACCEPTED_ACCURACY_M) {
+        setError(
+          `GPS nauwkeurigheid is te laag (+/-${Math.round(
+            accuracyM
+          )} m). Zet exacte locatie aan en gebruik de app buiten.`
+        );
+        return;
+      }
+
+      const nextLocation: RiderLocation = {
+        userId: user?.id ?? "local-user",
+        name: displayName,
+        lat: position.coords.latitude,
+        lng: position.coords.longitude,
+        speedKmh:
+          typeof position.coords.speed === "number" && position.coords.speed !== null
+            ? Math.max(0, position.coords.speed * 3.6)
+            : undefined,
+        heading:
+          typeof position.coords.heading === "number" && position.coords.heading !== null
+            ? position.coords.heading
+            : undefined,
+        accuracyM,
+        updatedAt: new Date(position.timestamp).toISOString(),
+        color,
+        isSelf: true
+      };
+
+      lastAcceptedLocationRef.current = nextLocation;
+      setOwnLocation(nextLocation);
+      setError(null);
+    };
+
+    navigator.geolocation.getCurrentPosition(
+      handlePosition,
       (locationError) => {
         setError(locationError.message);
       },
-      {
-        enableHighAccuracy: true,
-        maximumAge: 5000,
-        timeout: 12000
-      }
+      GEOLOCATION_OPTIONS
+    );
+
+    const watchId = navigator.geolocation.watchPosition(
+      handlePosition,
+      (locationError) => {
+        if (lastAcceptedLocationRef.current) {
+          setOwnLocation(lastAcceptedLocationRef.current);
+        }
+
+        setError(locationError.message);
+      },
+      GEOLOCATION_OPTIONS
     );
 
     return () => navigator.geolocation.clearWatch(watchId);

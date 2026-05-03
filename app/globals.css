@@ -337,6 +337,15 @@ h2 {
   margin-top: 8px;
 }
 
+.routes-scroll {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
 .type-filter-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -396,8 +405,6 @@ h2 {
 
 .sample-list {
   margin-top: 12px;
-  overflow-y: auto;
-  padding-right: 4px;
 }
 
 .loaded-routes {
@@ -1053,7 +1060,7 @@ h2 {
     height: 52dvh;
     max-height: none;
     display: grid;
-    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-rows: auto minmax(0, 1fr);
     gap: 8px;
     padding: 0 10px max(10px, env(safe-area-inset-bottom));
     transition: height 180ms ease;
@@ -1138,10 +1145,6 @@ h2 {
     display: none;
   }
 
-  .sidebar.sheet-half .status-panel {
-    display: none;
-  }
-
   .routes-panel,
   .status-panel {
     padding: 12px;
@@ -1152,15 +1155,36 @@ h2 {
   }
 
   .status-panel {
+    position: absolute;
+    right: 10px;
+    bottom: max(10px, env(safe-area-inset-bottom));
+    left: 10px;
+    z-index: 6;
+    display: none;
     gap: 9px;
-    max-height: 30dvh;
+    max-height: min(58dvh, 420px);
     overflow-y: auto;
   }
 
-  .sample-list,
-  .plan-list {
+  .sidebar.mobile-live-open .status-panel {
+    display: grid;
+  }
+
+  .routes-scroll,
+  .plan-view,
+  .status-panel {
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
+  }
+
+  .plan-view {
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+
+  .plan-list {
+    overflow: visible;
+    padding-right: 0;
   }
 
   .stats-grid,
