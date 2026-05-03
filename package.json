@@ -7,10 +7,13 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "import:gpx": "node scripts/import-gpx-to-supabase.mjs",
+    "import:gpx:dry-run": "node scripts/import-gpx-to-supabase.mjs --dry-run"
   },
   "dependencies": {
     "@supabase/supabase-js": "latest",
+    "fast-xml-parser": "^5.7.2",
     "leaflet": "latest",
     "lucide-react": "latest",
     "next": "latest",

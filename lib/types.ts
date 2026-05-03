@@ -18,7 +18,7 @@ export type Waypoint = RoutePoint & {
 export type GpxRoute = {
   id: string;
   name: string;
-  source: "sample" | "upload";
+  source: "sample" | "upload" | "supabase";
   group?: string;
   country: RouteCountry;
   routeType: RouteType;

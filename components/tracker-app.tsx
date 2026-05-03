@@ -32,10 +32,11 @@ import {
   Users,
   Wrench
 } from "lucide-react";
-import { ChangeEvent, type PointerEvent, useMemo, useRef, useState } from "react";
+import { ChangeEvent, type PointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import { formatKm, formatMeters, parseGpxRoute } from "@/lib/gpx";
 import { sampleRoutes, type SampleRoute } from "@/lib/sample-routes";
 import { getSupabaseBrowserClient } from "@/lib/supabase";
+import { loadPublicSupabaseRoutes } from "@/lib/supabase-routes";
 import { useLiveLocation } from "@/lib/live-location";
 import type { GpxRoute, MapPoint, MapPointType, RiderLocation, RouteCountry, RouteType } from "@/lib/types";
 import { RouteMap } from "@/components/route-map";
@@ -60,6 +61,29 @@ function groupSamples(routes: SampleRoute[]) {
     groups[key] = [...(groups[key] ?? []), route];
     return groups;
   }, {});
+}
+
+function routeMatchesFilters(
+  route: {
+    country: RouteCountry;
+    routeType: RouteType;
+    group?: string;
+    name?: string;
+    title?: string;
+    fileName?: string;
+  },
+  query: string,
+  countryFilter: "all" | RouteCountry,
+  routeTypeFilter: "all" | RouteType
+) {
+  const haystack = `${route.country} ${route.group ?? ""} ${route.name ?? ""} ${route.title ?? ""} ${
+    route.fileName ?? ""
+  } ${route.routeType}`.toLowerCase();
+  const matchesQuery = haystack.includes(query.toLowerCase());
+  const matchesCountry = countryFilter === "all" || route.country === countryFilter;
+  const matchesType = routeTypeFilter === "all" || route.routeType === routeTypeFilter;
+
+  return matchesQuery && matchesCountry && matchesType;
 }
 
 function routeTypeLabel(routeType: RouteType) {
@@ -183,6 +207,8 @@ export function TrackerApp() {
   const [query, setQuery] = useState("");
   const [loadingRoute, setLoadingRoute] = useState<string | null>(null);
   const [routeError, setRouteError] = useState<string | null>(null);
+  const [loadingSupabaseRoutes, setLoadingSupabaseRoutes] = useState(false);
+  const [supabaseRouteError, setSupabaseRouteError] = useState<string | null>(null);
   const [trackingEnabled, setTrackingEnabled] = useState(false);
   const [followOwnLocation, setFollowOwnLocation] = useState(true);
   const [displayName, setDisplayName] = useState("Rijder 1");
@@ -200,24 +226,31 @@ export function TrackerApp() {
   );
   const filteredSamples = useMemo(
     () =>
-      sampleRoutes.filter((route) => {
-        const matchesQuery = `${route.country} ${route.group} ${route.title} ${route.routeType}`
-          .toLowerCase()
-          .includes(query.toLowerCase());
-        const matchesCountry = countryFilter === "all" || route.country === countryFilter;
-        const matchesType = routeTypeFilter === "all" || route.routeType === routeTypeFilter;
-
-        return matchesQuery && matchesCountry && matchesType;
-      }),
+      sampleRoutes.filter((route) =>
+        routeMatchesFilters(
+          { ...route, name: route.title },
+          query,
+          countryFilter,
+          routeTypeFilter
+        )
+      ),
     [countryFilter, query, routeTypeFilter]
+  );
+  const filteredRoutes = useMemo(
+    () => routes.filter((route) => routeMatchesFilters(route, query, countryFilter, routeTypeFilter)),
+    [countryFilter, query, routeTypeFilter, routes]
   );
   const groupedSamples = useMemo(() => groupSamples(filteredSamples), [filteredSamples]);
   const routeTypeCounts = useMemo(
     () => ({
-      "4x4": sampleRoutes.filter((route) => route.routeType === "4x4").length,
-      roadtrip: sampleRoutes.filter((route) => route.routeType === "roadtrip").length
+      "4x4":
+        sampleRoutes.filter((route) => route.routeType === "4x4").length +
+        routes.filter((route) => route.routeType === "4x4").length,
+      roadtrip:
+        sampleRoutes.filter((route) => route.routeType === "roadtrip").length +
+        routes.filter((route) => route.routeType === "roadtrip").length
     }),
-    []
+    [routes]
   );
   const planStats = useMemo(() => {
     const driveMinutes = plannedRoutes.reduce((total, route) => total + estimateRouteMinutes(route), 0);
@@ -247,6 +280,42 @@ export function TrackerApp() {
     displayName,
     color: "#2563eb"
   });
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadRoutes() {
+      setLoadingSupabaseRoutes(true);
+      setSupabaseRouteError(null);
+
+      try {
+        const supabaseRoutes = await loadPublicSupabaseRoutes();
+        if (cancelled || supabaseRoutes.length === 0) return;
+
+        setRoutes((current) => {
+          const localRoutes = current.filter((route) => route.source !== "supabase");
+          const localIds = new Set(localRoutes.map((route) => route.id));
+          const nextSupabaseRoutes = supabaseRoutes.filter((route) => !localIds.has(route.id));
+
+          return [...nextSupabaseRoutes, ...localRoutes];
+        });
+      } catch (error) {
+        if (!cancelled) {
+          setSupabaseRouteError(error instanceof Error ? error.message : "Routes uit Supabase konden niet laden.");
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingSupabaseRoutes(false);
+        }
+      }
+    }
+
+    loadRoutes();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   function isMobileViewport() {
     return typeof window !== "undefined" && window.matchMedia("(max-width: 760px)").matches;
@@ -713,10 +782,12 @@ export function TrackerApp() {
                 </div>
               </div>
 
-              {routes.length > 0 && (
+              {loadingSupabaseRoutes && <p className="muted-text">Supabase routes laden...</p>}
+
+              {filteredRoutes.length > 0 && (
                 <div className="loaded-routes">
-                  <span className="section-label">Geladen</span>
-                  {routes.map((route) => {
+                  <span className="section-label">Geimporteerd/geupload</span>
+                  {filteredRoutes.map((route) => {
                     const Icon = routeTypeIcon(route.routeType);
 
                     return (
@@ -730,7 +801,8 @@ export function TrackerApp() {
                           <span>
                             <strong>{route.name}</strong>
                             <small>
-                              {route.country} - {routeTypeLabel(route.routeType)} - {formatKm(route.distanceKm)} km
+                              {route.country} - {route.group ?? route.source} - {routeTypeLabel(route.routeType)} -{" "}
+                              {formatKm(route.distanceKm)} km
                             </small>
                           </span>
                           <Icon size={16} aria-hidden />
@@ -789,6 +861,7 @@ export function TrackerApp() {
               </div>
 
               {routeError && <p className="error-text">{routeError}</p>}
+              {supabaseRouteError && <p className="error-text">{supabaseRouteError}</p>}
             </>
           ) : (
             <div className="plan-view">
