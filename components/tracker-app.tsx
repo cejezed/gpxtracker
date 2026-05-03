@@ -8,6 +8,8 @@ import {
   Car,
   Camera,
   Crosshair,
+  Eye,
+  EyeOff,
   Flag,
   FileUp,
   Fuel,
@@ -17,6 +19,7 @@ import {
   LogIn,
   LogOut,
   ListChecks,
+  ListPlus,
   MapPinned,
   MapPin,
   Maximize2,
@@ -174,6 +177,53 @@ function addMinutesToTime(time: string, minutes: number) {
   return `${String(nextHours).padStart(2, "0")}:${String(nextMinutes).padStart(2, "0")}`;
 }
 
+function distanceKmBetween(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
+  const radiusKm = 6371;
+  const lat1 = (a.lat * Math.PI) / 180;
+  const lat2 = (b.lat * Math.PI) / 180;
+  const deltaLat = ((b.lat - a.lat) * Math.PI) / 180;
+  const deltaLng = ((b.lng - a.lng) * Math.PI) / 180;
+  const sinLat = Math.sin(deltaLat / 2);
+  const sinLng = Math.sin(deltaLng / 2);
+  const c = sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLng * sinLng;
+
+  return radiusKm * 2 * Math.atan2(Math.sqrt(c), Math.sqrt(1 - c));
+}
+
+function connectionDistanceKm(previous: GpxRoute, next: GpxRoute) {
+  const previousEnd = previous.points.at(-1);
+  const nextStart = next.points[0];
+
+  if (!previousEnd || !nextStart) return 0;
+  return distanceKmBetween(previousEnd, nextStart);
+}
+
+function orderByNearestConnection(routes: GpxRoute[]) {
+  if (routes.length <= 2) return routes;
+
+  const ordered = [routes[0]];
+  const remaining = routes.slice(1);
+
+  while (remaining.length > 0) {
+    const previous = ordered[ordered.length - 1];
+    let nearestIndex = 0;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+
+    remaining.forEach((route, index) => {
+      const distance = connectionDistanceKm(previous, route);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = index;
+      }
+    });
+
+    const [nearest] = remaining.splice(nearestIndex, 1);
+    ordered.push(nearest);
+  }
+
+  return ordered;
+}
+
 function formatRiderMeta(rider: RiderLocation) {
   const parts: string[] = [];
 
@@ -199,9 +249,11 @@ export function TrackerApp() {
   const [pointCoordinates, setPointCoordinates] = useState("");
   const [pointNote, setPointNote] = useState("");
   const [pointError, setPointError] = useState<string | null>(null);
+  const [mapPickMode, setMapPickMode] = useState(false);
   const [activePanel, setActivePanel] = useState<ActivePanel>("routes");
   const [mobileSheetMode, setMobileSheetMode] = useState<MobileSheetMode>("half");
   const [mobileLiveOpen, setMobileLiveOpen] = useState(false);
+  const [overviewRouteIds, setOverviewRouteIds] = useState<string[]>([]);
   const [countryFilter, setCountryFilter] = useState<"all" | RouteCountry>("all");
   const [routeTypeFilter, setRouteTypeFilter] = useState<"all" | RouteType>("all");
   const [activeRouteId, setActiveRouteId] = useState<string | null>(null);
@@ -225,6 +277,14 @@ export function TrackerApp() {
         .filter((route): route is GpxRoute => Boolean(route)),
     [dayPlanItems, routeMap]
   );
+  const overviewRoutes = useMemo(
+    () =>
+      overviewRouteIds
+        .map((routeId) => routeMap.get(routeId))
+        .filter((route): route is GpxRoute => Boolean(route)),
+    [overviewRouteIds, routeMap]
+  );
+  const visibleMapRoutes = activePanel === "plan" ? plannedRoutes : overviewRoutes;
   const filteredSamples = useMemo(
     () =>
       sampleRoutes.filter((route) =>
@@ -265,6 +325,26 @@ export function TrackerApp() {
       totalMinutes: driveMinutes + breakMinutes
     };
   }, [dayPlanItems, plannedRoutes]);
+  const overviewConnections = useMemo(
+    () =>
+      overviewRoutes.slice(1).map((route, index) => {
+        const previous = overviewRoutes[index];
+        return {
+          id: `${previous.id}-${route.id}`,
+          from: previous.name,
+          to: route.name,
+          distanceKm: connectionDistanceKm(previous, route)
+        };
+      }),
+    [overviewRoutes]
+  );
+  const overviewStats = useMemo(
+    () => ({
+      routeDistanceKm: overviewRoutes.reduce((total, route) => total + route.distanceKm, 0),
+      connectionDistanceKm: overviewConnections.reduce((total, connection) => total + connection.distanceKm, 0)
+    }),
+    [overviewConnections, overviewRoutes]
+  );
 
   const {
     supabaseConfigured,
@@ -326,9 +406,43 @@ export function TrackerApp() {
     setActiveRouteId(routeId);
   }
 
+  function isRouteInOverview(routeId: string) {
+    return overviewRouteIds.includes(routeId);
+  }
+
+  function toggleRouteInOverview(route: GpxRoute) {
+    setOverviewRouteIds((current) =>
+      current.includes(route.id) ? current.filter((routeId) => routeId !== route.id) : [...current, route.id]
+    );
+    setActiveRouteId(route.id);
+  }
+
+  function findLoadedSampleRoute(sample: SampleRoute) {
+    return routes.find(
+      (route) => route.source === "sample" && route.group === sample.group && route.fileName === sample.fileName
+    );
+  }
+
+  async function toggleSampleInOverview(sample: SampleRoute) {
+    setLoadingRoute(sample.url);
+    setRouteError(null);
+
+    try {
+      const loadedRoute = await ensureSampleRoute(sample);
+      toggleRouteInOverview(loadedRoute);
+    } catch (error) {
+      setRouteError(error instanceof Error ? error.message : "Route kon niet aan het overzicht worden toegevoegd.");
+    } finally {
+      setLoadingRoute(null);
+    }
+  }
+
   function openPanel(panel: ActivePanel) {
     setActivePanel(panel);
     setMobileLiveOpen(false);
+    if (panel === "routes") {
+      setMapPickMode(false);
+    }
     if (isMobileViewport() && mobileSheetMode === "compact") {
       setMobileSheetMode("half");
     }
@@ -373,6 +487,35 @@ export function TrackerApp() {
       return existing ? current : [route, ...current];
     });
     setActiveRouteId(route.id);
+  }
+
+  function addRoutesToPlan(routesToAdd: GpxRoute[]) {
+    if (routesToAdd.length === 0) return;
+
+    setDayPlanItems((current) => {
+      const next = [...current];
+
+      routesToAdd.forEach((route, index) => {
+        if (next.some((item) => item.routeId === route.id)) return;
+
+        next.push({
+          id: `plan-${route.id}-${Date.now()}-${index}`,
+          routeId: route.id,
+          startTime: suggestedStartTime(next),
+          breakMinutes: next.length === 0 ? 0 : 15,
+          note: ""
+        });
+      });
+
+      return next;
+    });
+
+    setActiveRouteId(routesToAdd[0].id);
+    setActivePanel("plan");
+    setMapPickMode(false);
+    if (isMobileViewport()) {
+      setMobileSheetMode("half");
+    }
   }
 
   async function addRouteFromText(
@@ -440,25 +583,7 @@ export function TrackerApp() {
   }
 
   function addRouteToPlan(route: GpxRoute) {
-    setDayPlanItems((current) => {
-      if (current.some((item) => item.routeId === route.id)) return current;
-
-      return [
-        ...current,
-        {
-          id: `plan-${route.id}-${Date.now()}`,
-          routeId: route.id,
-          startTime: suggestedStartTime(current),
-          breakMinutes: current.length === 0 ? 0 : 15,
-          note: ""
-        }
-      ];
-    });
-    setActiveRouteId(route.id);
-    setActivePanel("plan");
-    if (isMobileViewport()) {
-      setMobileSheetMode("half");
-    }
+    addRoutesToPlan([route]);
   }
 
   async function addSampleToPlan(sample: SampleRoute) {
@@ -473,6 +598,51 @@ export function TrackerApp() {
     } finally {
       setLoadingRoute(null);
     }
+  }
+
+  async function selectVisibleRoutesForOverview() {
+    setLoadingRoute("overview-all");
+    setRouteError(null);
+
+    try {
+      const selectedRoutes: GpxRoute[] = [...filteredRoutes];
+
+      for (const sample of filteredSamples) {
+        const route = await ensureSampleRoute(sample);
+        selectedRoutes.push(route);
+      }
+
+      setOverviewRouteIds((current) => {
+        const next = [...current];
+        selectedRoutes.forEach((route) => {
+          if (!next.includes(route.id)) {
+            next.push(route.id);
+          }
+        });
+
+        return next;
+      });
+
+      if (selectedRoutes[0]) {
+        setActiveRouteId(selectedRoutes[0].id);
+      }
+
+      if (isMobileViewport()) {
+        setMobileSheetMode("compact");
+      }
+    } catch (error) {
+      setRouteError(error instanceof Error ? error.message : "Zichtbare routes konden niet worden geselecteerd.");
+    } finally {
+      setLoadingRoute(null);
+    }
+  }
+
+  function addOverviewToPlan() {
+    addRoutesToPlan(overviewRoutes);
+  }
+
+  function sortOverviewByNearest() {
+    setOverviewRouteIds(orderByNearestConnection(overviewRoutes).map((route) => route.id));
   }
 
   function movePlanItem(itemId: string, direction: -1 | 1) {
@@ -507,6 +677,7 @@ export function TrackerApp() {
       }
     ]);
     setPointError(null);
+    setMapPickMode(false);
     setActivePanel("plan");
     if (isMobileViewport()) {
       setMobileSheetMode("half");
@@ -557,6 +728,30 @@ export function TrackerApp() {
       type: pointType,
       lat: parsed.lat,
       lng: parsed.lng,
+      note: pointNote.trim() || undefined,
+      source: "manual"
+    });
+  }
+
+  function toggleMapPickMode() {
+    setActivePanel("plan");
+    setMobileLiveOpen(false);
+    setMapPickMode((current) => !current);
+
+    if (isMobileViewport()) {
+      setMobileSheetMode("compact");
+    }
+  }
+
+  function addPointFromMapClick(lat: number, lng: number) {
+    if (!mapPickMode) return;
+
+    setPointCoordinates(formatCoordinate(lat, lng));
+    addMapPoint({
+      name: buildPointName(),
+      type: pointType,
+      lat,
+      lng,
       note: pointNote.trim() || undefined,
       source: "manual"
     });
@@ -641,11 +836,13 @@ export function TrackerApp() {
     <main className="app-shell">
       <RouteMap
         route={activeRoute}
-        plannedRoutes={activePanel === "plan" ? plannedRoutes : []}
+        visibleRoutes={visibleMapRoutes}
         mapPoints={mapPoints}
         riders={remoteRiders}
         ownLocation={ownLocation}
         followOwnLocation={followOwnLocation}
+        mapPickMode={mapPickMode}
+        onMapClick={addPointFromMapClick}
       />
 
       <header className="topbar">
@@ -679,6 +876,16 @@ export function TrackerApp() {
           </button>
         </div>
       </header>
+
+      {mapPickMode && (
+        <div className="map-pick-banner">
+          <MapPin size={17} aria-hidden />
+          <strong>{mapPointLabel(pointType)}</strong>
+          <button type="button" onClick={() => setMapPickMode(false)}>
+            Annuleer
+          </button>
+        </div>
+      )}
 
       <aside className={`sidebar sheet-${mobileSheetMode}${mobileLiveOpen ? " mobile-live-open" : ""}`}>
         <div className="mobile-sheet-bar">
@@ -799,6 +1006,73 @@ export function TrackerApp() {
                 </div>
               </div>
 
+              <div className="overview-panel">
+                <div className="overview-header">
+                  <div>
+                    <span className="section-label">Overzicht</span>
+                    <strong>{overviewRoutes.length} routes op kaart</strong>
+                    <small>
+                      {formatKm(overviewStats.routeDistanceKm)} km route
+                      {overviewStats.connectionDistanceKm > 0
+                        ? ` - ${formatKm(overviewStats.connectionDistanceKm)} km verbinding`
+                        : ""}
+                    </small>
+                  </div>
+                  <div className="overview-actions">
+                    <button
+                      type="button"
+                      className="icon-button mini"
+                      onClick={selectVisibleRoutesForOverview}
+                      disabled={loadingRoute === "overview-all"}
+                      title="Zichtbare routes tonen"
+                    >
+                      <Eye size={16} aria-hidden />
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button mini"
+                      onClick={sortOverviewByNearest}
+                      disabled={overviewRoutes.length < 3}
+                      title="Sorteer op dichtstbijzijnde aansluiting"
+                    >
+                      <RouteIcon size={16} aria-hidden />
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button mini"
+                      onClick={() => setOverviewRouteIds([])}
+                      disabled={overviewRoutes.length === 0}
+                      title="Overzicht wissen"
+                    >
+                      <EyeOff size={16} aria-hidden />
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button mini"
+                      onClick={addOverviewToPlan}
+                      disabled={overviewRoutes.length === 0}
+                      title="Overzicht toevoegen aan dagschema"
+                    >
+                      <ListPlus size={16} aria-hidden />
+                    </button>
+                  </div>
+                </div>
+
+                {overviewConnections.length > 0 && (
+                  <div className="overview-connection-list">
+                    {overviewConnections.map((connection, index) => (
+                      <div key={connection.id} className="overview-connection-row">
+                        <span>{index + 1}</span>
+                        <small>
+                          {connection.from} naar {connection.to}
+                        </small>
+                        <strong>{formatKm(connection.distanceKm)} km</strong>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
               {loadingSupabaseRoutes && <p className="muted-text">Supabase routes laden...</p>}
 
               {filteredRoutes.length > 0 && (
@@ -806,6 +1080,7 @@ export function TrackerApp() {
                   <span className="section-label">Geimporteerd/geupload</span>
                   {filteredRoutes.map((route) => {
                     const Icon = routeTypeIcon(route.routeType);
+                    const inOverview = isRouteInOverview(route.id);
 
                     return (
                       <div key={route.id} className="route-row-shell">
@@ -823,6 +1098,14 @@ export function TrackerApp() {
                             </small>
                           </span>
                           <Icon size={16} aria-hidden />
+                        </button>
+                        <button
+                          type="button"
+                          className={inOverview ? "icon-button mini active" : "icon-button mini"}
+                          onClick={() => toggleRouteInOverview(route)}
+                          title={inOverview ? "Verbergen in overzicht" : "Tonen in overzicht"}
+                        >
+                          {inOverview ? <Eye size={16} aria-hidden /> : <EyeOff size={16} aria-hidden />}
                         </button>
                         <button
                           type="button"
@@ -844,6 +1127,9 @@ export function TrackerApp() {
                     <span className="section-label">{group}</span>
                     {groupRoutes.map((sample) => {
                       const Icon = routeTypeIcon(sample.routeType);
+                      const loadedSampleRoute = findLoadedSampleRoute(sample);
+                      const inOverview = loadedSampleRoute ? isRouteInOverview(loadedSampleRoute.id) : false;
+                      const routeIsLoading = loadingRoute === sample.url || loadingRoute === "overview-all";
 
                       return (
                         <div key={sample.url} className="route-row-shell">
@@ -851,21 +1137,30 @@ export function TrackerApp() {
                             type="button"
                             className="route-row"
                             onClick={() => loadSampleRoute(sample)}
-                            disabled={loadingRoute === sample.url}
+                            disabled={routeIsLoading}
                           >
                             <Icon size={16} aria-hidden />
                             <span>
                               <strong>{sample.title}</strong>
                               <small>
-                                {loadingRoute === sample.url ? "Laden" : `${sample.country} - ${sample.group}`}
+                                {routeIsLoading ? "Laden" : `${sample.country} - ${sample.group}`}
                               </small>
                             </span>
                           </button>
                           <button
                             type="button"
+                            className={inOverview ? "icon-button mini active" : "icon-button mini"}
+                            onClick={() => toggleSampleInOverview(sample)}
+                            disabled={routeIsLoading}
+                            title={inOverview ? "Verbergen in overzicht" : "Tonen in overzicht"}
+                          >
+                            {inOverview ? <Eye size={16} aria-hidden /> : <EyeOff size={16} aria-hidden />}
+                          </button>
+                          <button
+                            type="button"
                             className="icon-button mini"
                             onClick={() => addSampleToPlan(sample)}
-                            disabled={loadingRoute === sample.url}
+                            disabled={routeIsLoading}
                             title="Toevoegen aan dagschema"
                           >
                             <Plus size={16} aria-hidden />
@@ -943,6 +1238,15 @@ export function TrackerApp() {
                     );
                   })}
                 </div>
+
+                <button
+                  type="button"
+                  className={mapPickMode ? "control wide-control active" : "control wide-control"}
+                  onClick={toggleMapPickMode}
+                >
+                  <Crosshair size={16} aria-hidden />
+                  <span>{mapPickMode ? "Punt plaatsen actief" : "Plaats via kaart"}</span>
+                </button>
 
                 <input
                   className="plan-note"
