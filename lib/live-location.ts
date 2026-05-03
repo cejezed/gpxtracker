@@ -18,6 +18,7 @@ type PresenceState = {
   lng: number;
   speedKmh?: number;
   heading?: number;
+  accuracyM?: number;
   color: string;
   updatedAt: string;
 };
@@ -104,6 +105,10 @@ export function useLiveLocation({
             typeof position.coords.heading === "number" && position.coords.heading !== null
               ? position.coords.heading
               : undefined,
+          accuracyM:
+            typeof position.coords.accuracy === "number" && Number.isFinite(position.coords.accuracy)
+              ? position.coords.accuracy
+              : undefined,
           updatedAt: new Date(position.timestamp).toISOString(),
           color,
           isSelf: true
@@ -148,6 +153,7 @@ export function useLiveLocation({
           lng: presence.lng,
           speedKmh: presence.speedKmh,
           heading: presence.heading,
+          accuracyM: presence.accuracyM,
           updatedAt: presence.updatedAt,
           color: presence.color,
           isSelf: key === user.id
@@ -186,6 +192,7 @@ export function useLiveLocation({
       lng: ownLocation.lng,
       speedKmh: ownLocation.speedKmh,
       heading: ownLocation.heading,
+      accuracyM: ownLocation.accuracyM,
       updatedAt: ownLocation.updatedAt,
       color
     });

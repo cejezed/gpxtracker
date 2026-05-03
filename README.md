@@ -3,6 +3,16 @@
 Next.js MVP voor offroad GPX-routes met OpenStreetMap, lokale GPX-import en
 Supabase-ready live groepslocatie.
 
+## Functies
+
+- GPX-routes bekijken op OpenStreetMap.
+- Filteren op land en route-type.
+- Dagschema maken met meerdere etappes, starttijden, pauzes en notities.
+- Meerdere geplande routes tegelijk op de kaart tonen.
+- Offroad/Roadtrip routefilters met duidelijke iconen.
+- Kaartpunten toevoegen via GPS-coordinaten, huidige locatie of route-eindpunt.
+- Live groepslocatie via Supabase Presence.
+
 ## Lokaal starten
 
 ```bash

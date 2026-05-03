@@ -1,3 +1,9 @@
+export type RouteCountry = "Engeland" | "Duitsland" | "Onbekend";
+
+export type RouteType = "4x4" | "roadtrip";
+
+export type MapPointType = "overnight" | "fuel" | "food" | "viewpoint" | "repair" | "note";
+
 export type RoutePoint = {
   lat: number;
   lng: number;
@@ -14,6 +20,8 @@ export type GpxRoute = {
   name: string;
   source: "sample" | "upload";
   group?: string;
+  country: RouteCountry;
+  routeType: RouteType;
   fileName?: string;
   color: string;
   points: RoutePoint[];
@@ -30,7 +38,18 @@ export type RiderLocation = {
   lng: number;
   speedKmh?: number;
   heading?: number;
+  accuracyM?: number;
   updatedAt: string;
   color: string;
   isSelf?: boolean;
+};
+
+export type MapPoint = {
+  id: string;
+  name: string;
+  type: MapPointType;
+  lat: number;
+  lng: number;
+  note?: string;
+  source: "manual" | "own-location" | "route-end";
 };

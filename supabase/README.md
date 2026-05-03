@@ -8,5 +8,5 @@
 4. Zet Supabase Auth aan met email magic links.
 
 De huidige app gebruikt Supabase Presence voor live posities. De tabellen in
-`schema.sql` zijn alvast voorbereid voor routes, ritten, leden en optionele
-persistente live-locaties.
+`schema.sql` zijn alvast voorbereid voor routes, ritten, leden, dagschema's,
+kaartpunten en optionele persistente live-locaties.

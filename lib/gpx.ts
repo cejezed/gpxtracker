@@ -1,6 +1,13 @@
-import type { GpxRoute, RoutePoint, Waypoint } from "@/lib/types";
+import type { GpxRoute, RouteCountry, RoutePoint, RouteType, Waypoint } from "@/lib/types";
 
 const ROUTE_COLORS = ["#f97316", "#0ea5e9", "#22c55e", "#e11d48", "#8b5cf6"];
+
+type ParseGpxOptions = {
+  colorIndex?: number;
+  group?: string;
+  country?: RouteCountry;
+  routeType?: RouteType;
+};
 
 function byLocalName(root: ParentNode, localName: string) {
   return Array.from(root.querySelectorAll("*")).filter(
@@ -86,9 +93,14 @@ export function parseGpxRoute(
   text: string,
   fileName: string,
   source: GpxRoute["source"],
-  colorIndex = 0,
-  group?: string
+  options: ParseGpxOptions = {}
 ): GpxRoute {
+  const {
+    colorIndex = 0,
+    group,
+    country = "Onbekend",
+    routeType = "4x4"
+  } = options;
   const parser = new DOMParser();
   const xml = parser.parseFromString(text, "application/xml");
   const parseError = byLocalName(xml, "parsererror")[0];
@@ -133,6 +145,8 @@ export function parseGpxRoute(
     name,
     source,
     group,
+    country,
+    routeType,
     fileName,
     color: ROUTE_COLORS[colorIndex % ROUTE_COLORS.length],
     points,
