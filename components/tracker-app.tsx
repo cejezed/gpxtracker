@@ -254,9 +254,6 @@ export function TrackerApp() {
 
   function selectRoute(routeId: string) {
     setActiveRouteId(routeId);
-    if (isMobileViewport()) {
-      setMobileSheetMode("compact");
-    }
   }
 
   function openPanel(panel: ActivePanel) {
@@ -292,17 +289,12 @@ export function TrackerApp() {
     setMobileSheetMode((mode) => (mode === "expanded" ? "half" : "compact"));
   }
 
-  function upsertRoute(route: GpxRoute, collapseOnMobile = true) {
+  function upsertRoute(route: GpxRoute) {
     setRoutes((current) => {
       const existing = current.find((currentRoute) => currentRoute.id === route.id);
       return existing ? current : [route, ...current];
     });
-
-    if (collapseOnMobile) {
-      selectRoute(route.id);
-    } else {
-      setActiveRouteId(route.id);
-    }
+    setActiveRouteId(route.id);
   }
 
   async function addRouteFromText(
@@ -313,7 +305,6 @@ export function TrackerApp() {
       group?: string;
       country?: RouteCountry;
       routeType?: RouteType;
-      collapseOnMobile?: boolean;
     } = {}
   ) {
     const parsedRoute = parseGpxRoute(text, fileName, source, {
@@ -322,21 +313,17 @@ export function TrackerApp() {
       country: options.country,
       routeType: options.routeType
     });
-    upsertRoute(parsedRoute, options.collapseOnMobile ?? true);
+    upsertRoute(parsedRoute);
     return parsedRoute;
   }
 
-  async function ensureSampleRoute(sample: SampleRoute, collapseOnMobile = true) {
+  async function ensureSampleRoute(sample: SampleRoute) {
     const existing = routes.find(
       (route) => route.source === "sample" && route.group === sample.group && route.fileName === sample.fileName
     );
 
     if (existing) {
-      if (collapseOnMobile) {
-        selectRoute(existing.id);
-      } else {
-        setActiveRouteId(existing.id);
-      }
+      setActiveRouteId(existing.id);
       return existing;
     }
 
@@ -347,8 +334,7 @@ export function TrackerApp() {
     return addRouteFromText(text, sample.fileName, "sample", {
       group: sample.group,
       country: sample.country,
-      routeType: sample.routeType,
-      collapseOnMobile
+      routeType: sample.routeType
     });
   }
 
@@ -391,7 +377,8 @@ export function TrackerApp() {
       ];
     });
     setActiveRouteId(route.id);
-    if (isMobileViewport() && mobileSheetMode === "compact") {
+    setActivePanel("plan");
+    if (isMobileViewport()) {
       setMobileSheetMode("half");
     }
   }
@@ -401,9 +388,8 @@ export function TrackerApp() {
     setRouteError(null);
 
     try {
-      const route = await ensureSampleRoute(sample, false);
+      const route = await ensureSampleRoute(sample);
       addRouteToPlan(route);
-      setActivePanel("plan");
     } catch (error) {
       setRouteError(error instanceof Error ? error.message : "Route kon niet worden toegevoegd.");
     } finally {
@@ -577,7 +563,7 @@ export function TrackerApp() {
     <main className="app-shell">
       <RouteMap
         route={activeRoute}
-        plannedRoutes={plannedRoutes}
+        plannedRoutes={activePanel === "plan" ? plannedRoutes : []}
         mapPoints={mapPoints}
         riders={remoteRiders}
         ownLocation={ownLocation}
