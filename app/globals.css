@@ -546,6 +546,18 @@ h2 {
   margin-top: 14px;
 }
 
+.route-group + .route-group {
+  margin-top: 12px;
+}
+
+.route-group-label {
+  display: block;
+  margin: 0 0 7px 2px;
+  color: #334155;
+  font-size: 0.76rem;
+  font-weight: 900;
+}
+
 .section-label {
   margin: 0 0 7px 2px;
   color: #475569;

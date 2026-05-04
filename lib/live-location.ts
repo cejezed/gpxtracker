@@ -23,12 +23,17 @@ type PresenceState = {
   updatedAt: string;
 };
 
-const MAX_ACCEPTED_ACCURACY_M = 200;
-const MAX_POSITION_AGE_MS = 30_000;
-const GEOLOCATION_OPTIONS: PositionOptions = {
+const LOW_ACCURACY_WARNING_M = 200;
+const STALE_POSITION_WARNING_MS = 120_000;
+const INITIAL_GEOLOCATION_OPTIONS: PositionOptions = {
   enableHighAccuracy: true,
-  maximumAge: 0,
-  timeout: 20_000
+  maximumAge: 60_000,
+  timeout: 15_000
+};
+const WATCH_GEOLOCATION_OPTIONS: PositionOptions = {
+  enableHighAccuracy: true,
+  maximumAge: 10_000,
+  timeout: 30_000
 };
 
 function demoPoint(route: GpxRoute | null, offset: number): RoutePoint | null {
@@ -100,31 +105,41 @@ export function useLiveLocation({
     }
 
     const handlePosition = (position: GeolocationPosition) => {
+      const lat = position.coords.latitude;
+      const lng = position.coords.longitude;
       const accuracyM =
         typeof position.coords.accuracy === "number" && Number.isFinite(position.coords.accuracy)
           ? position.coords.accuracy
           : undefined;
       const positionAgeMs = Date.now() - position.timestamp;
 
-      if (positionAgeMs > MAX_POSITION_AGE_MS) {
-        setError("GPS gaf een oude locatie door. Wacht op een nieuwe fix.");
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        setError("GPS gaf geen bruikbare coordinaten door.");
         return;
       }
 
-      if (accuracyM !== undefined && accuracyM > MAX_ACCEPTED_ACCURACY_M) {
-        setError(
-          `GPS nauwkeurigheid is te laag (+/-${Math.round(
-            accuracyM
-          )} m). Zet exacte locatie aan en gebruik de app buiten.`
-        );
+      const lastAcceptedAt = lastAcceptedLocationRef.current
+        ? new Date(lastAcceptedLocationRef.current.updatedAt).getTime()
+        : 0;
+
+      if (lastAcceptedAt > 0 && position.timestamp < lastAcceptedAt) {
         return;
       }
+
+      const warning =
+        positionAgeMs > STALE_POSITION_WARNING_MS
+          ? "GPS gaf een oude locatie door. Wacht op een nieuwe fix."
+          : accuracyM !== undefined && accuracyM > LOW_ACCURACY_WARNING_M
+            ? `GPS nauwkeurigheid is laag (+/-${Math.round(
+                accuracyM
+              )} m). Zet exacte locatie aan en gebruik de app buiten.`
+            : null;
 
       const nextLocation: RiderLocation = {
         userId: user?.id ?? "local-user",
         name: displayName,
-        lat: position.coords.latitude,
-        lng: position.coords.longitude,
+        lat,
+        lng,
         speedKmh:
           typeof position.coords.speed === "number" && position.coords.speed !== null
             ? Math.max(0, position.coords.speed * 3.6)
@@ -141,7 +156,7 @@ export function useLiveLocation({
 
       lastAcceptedLocationRef.current = nextLocation;
       setOwnLocation(nextLocation);
-      setError(null);
+      setError(warning);
     };
 
     navigator.geolocation.getCurrentPosition(
@@ -149,7 +164,7 @@ export function useLiveLocation({
       (locationError) => {
         setError(locationError.message);
       },
-      GEOLOCATION_OPTIONS
+      INITIAL_GEOLOCATION_OPTIONS
     );
 
     const watchId = navigator.geolocation.watchPosition(
@@ -161,7 +176,7 @@ export function useLiveLocation({
 
         setError(locationError.message);
       },
-      GEOLOCATION_OPTIONS
+      WATCH_GEOLOCATION_OPTIONS
     );
 
     return () => navigator.geolocation.clearWatch(watchId);

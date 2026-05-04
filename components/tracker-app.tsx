@@ -58,9 +58,55 @@ type DayPlanItem = {
   note: string;
 };
 
+const REGION_ORDER = ["Lake District", "Wales", "Hoch Sauerland", "Overig"];
+
+type RouteGroupInfo = {
+  country: RouteCountry;
+  routeType: RouteType;
+  group?: string;
+};
+
+function normalizeRegionName(group?: string, country?: RouteCountry) {
+  const normalized = group?.trim().toLowerCase().replace(/\s+/g, " ") ?? "";
+
+  if (normalized.includes("lake district")) return "Lake District";
+  if (normalized.includes("wales")) return "Wales";
+  if (normalized.includes("hochsauerland") || normalized.includes("hoch sauerland")) return "Hoch Sauerland";
+  if (country === "Duitsland") return "Hoch Sauerland";
+  if (country === "Engeland") return "Wales";
+
+  return group?.trim() || "Overig";
+}
+
+function routeGroupLabel(route: RouteGroupInfo) {
+  return `${normalizeRegionName(route.group, route.country)} - ${routeTypeLabel(route.routeType)}`;
+}
+
+function sortGroupEntries<T>(entries: Array<[string, T[]]>) {
+  return entries.sort(([a], [b]) => {
+    const regionA = a.split(" - ")[0];
+    const regionB = b.split(" - ")[0];
+    const orderA = REGION_ORDER.indexOf(regionA);
+    const orderB = REGION_ORDER.indexOf(regionB);
+    const normalizedOrderA = orderA === -1 ? REGION_ORDER.length : orderA;
+    const normalizedOrderB = orderB === -1 ? REGION_ORDER.length : orderB;
+
+    if (normalizedOrderA !== normalizedOrderB) return normalizedOrderA - normalizedOrderB;
+    return a.localeCompare(b, "nl");
+  });
+}
+
 function groupSamples(routes: SampleRoute[]) {
   return routes.reduce<Record<string, SampleRoute[]>>((groups, route) => {
-    const key = `${route.country} - ${routeTypeLabel(route.routeType)}`;
+    const key = routeGroupLabel(route);
+    groups[key] = [...(groups[key] ?? []), route];
+    return groups;
+  }, {});
+}
+
+function groupRoutes(routes: GpxRoute[]) {
+  return routes.reduce<Record<string, GpxRoute[]>>((groups, route) => {
+    const key = routeGroupLabel(route);
     groups[key] = [...(groups[key] ?? []), route];
     return groups;
   }, {});
@@ -302,6 +348,7 @@ export function TrackerApp() {
     [countryFilter, query, routeTypeFilter, routes]
   );
   const groupedSamples = useMemo(() => groupSamples(filteredSamples), [filteredSamples]);
+  const groupedRoutes = useMemo(() => groupRoutes(filteredRoutes), [filteredRoutes]);
   const routeTypeCounts = useMemo(
     () => ({
       "4x4":
@@ -1078,51 +1125,56 @@ export function TrackerApp() {
               {filteredRoutes.length > 0 && (
                 <div className="loaded-routes">
                   <span className="section-label">Geimporteerd/geupload</span>
-                  {filteredRoutes.map((route) => {
-                    const Icon = routeTypeIcon(route.routeType);
-                    const inOverview = isRouteInOverview(route.id);
+                  {sortGroupEntries(Object.entries(groupedRoutes)).map(([group, groupRoutes]) => (
+                    <div key={group} className="route-group">
+                      <span className="route-group-label">{group}</span>
+                      {groupRoutes.map((route) => {
+                        const Icon = routeTypeIcon(route.routeType);
+                        const inOverview = isRouteInOverview(route.id);
+                        const regionName = normalizeRegionName(route.group, route.country);
 
-                    return (
-                      <div key={route.id} className="route-row-shell">
-                        <button
-                          type="button"
-                          className={route.id === activeRouteId ? "route-row active" : "route-row"}
-                          onClick={() => selectRoute(route.id)}
-                        >
-                          <span className="route-color" style={{ background: route.color }} />
-                          <span>
-                            <strong>{route.name}</strong>
-                            <small>
-                              {route.country} - {route.group ?? route.source} - {routeTypeLabel(route.routeType)} -{" "}
-                              {formatKm(route.distanceKm)} km
-                            </small>
-                          </span>
-                          <Icon size={16} aria-hidden />
-                        </button>
-                        <button
-                          type="button"
-                          className={inOverview ? "icon-button mini active" : "icon-button mini"}
-                          onClick={() => toggleRouteInOverview(route)}
-                          title={inOverview ? "Verbergen in overzicht" : "Tonen in overzicht"}
-                        >
-                          {inOverview ? <Eye size={16} aria-hidden /> : <EyeOff size={16} aria-hidden />}
-                        </button>
-                        <button
-                          type="button"
-                          className="icon-button mini"
-                          onClick={() => addRouteToPlan(route)}
-                          title="Toevoegen aan dagschema"
-                        >
-                          <Plus size={16} aria-hidden />
-                        </button>
-                      </div>
-                    );
-                  })}
+                        return (
+                          <div key={route.id} className="route-row-shell">
+                            <button
+                              type="button"
+                              className={route.id === activeRouteId ? "route-row active" : "route-row"}
+                              onClick={() => selectRoute(route.id)}
+                            >
+                              <span className="route-color" style={{ background: route.color }} />
+                              <span>
+                                <strong>{route.name}</strong>
+                                <small>
+                                  {route.country} - {regionName} - {formatKm(route.distanceKm)} km
+                                </small>
+                              </span>
+                              <Icon size={16} aria-hidden />
+                            </button>
+                            <button
+                              type="button"
+                              className={inOverview ? "icon-button mini active" : "icon-button mini"}
+                              onClick={() => toggleRouteInOverview(route)}
+                              title={inOverview ? "Verbergen in overzicht" : "Tonen in overzicht"}
+                            >
+                              {inOverview ? <Eye size={16} aria-hidden /> : <EyeOff size={16} aria-hidden />}
+                            </button>
+                            <button
+                              type="button"
+                              className="icon-button mini"
+                              onClick={() => addRouteToPlan(route)}
+                              title="Toevoegen aan dagschema"
+                            >
+                              <Plus size={16} aria-hidden />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ))}
                 </div>
               )}
 
               <div className="sample-list">
-                {Object.entries(groupedSamples).map(([group, groupRoutes]) => (
+                {sortGroupEntries(Object.entries(groupedSamples)).map(([group, groupRoutes]) => (
                   <div key={group} className="sample-group">
                     <span className="section-label">{group}</span>
                     {groupRoutes.map((sample) => {
@@ -1130,6 +1182,7 @@ export function TrackerApp() {
                       const loadedSampleRoute = findLoadedSampleRoute(sample);
                       const inOverview = loadedSampleRoute ? isRouteInOverview(loadedSampleRoute.id) : false;
                       const routeIsLoading = loadingRoute === sample.url || loadingRoute === "overview-all";
+                      const regionName = normalizeRegionName(sample.group, sample.country);
 
                       return (
                         <div key={sample.url} className="route-row-shell">
@@ -1143,7 +1196,7 @@ export function TrackerApp() {
                             <span>
                               <strong>{sample.title}</strong>
                               <small>
-                                {routeIsLoading ? "Laden" : `${sample.country} - ${sample.group}`}
+                                {routeIsLoading ? "Laden" : `${sample.country} - ${regionName}`}
                               </small>
                             </span>
                           </button>
