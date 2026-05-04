@@ -38,16 +38,17 @@ import {
 import { ChangeEvent, type PointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import { formatKm, formatMeters, parseGpxRoute } from "@/lib/gpx";
 import { sampleRoutes, type SampleRoute } from "@/lib/sample-routes";
+import { buildRoadRoute } from "@/lib/routing";
 import { getSupabaseBrowserClient } from "@/lib/supabase";
 import { loadPublicSupabaseRoutes } from "@/lib/supabase-routes";
 import { useLiveLocation } from "@/lib/live-location";
-import type { GpxRoute, MapPoint, MapPointType, RiderLocation, RouteCountry, RouteType } from "@/lib/types";
+import type { GpxRoute, MapPoint, MapPointType, RiderLocation, RouteCountry, RoutePoint, RouteType } from "@/lib/types";
 import { RouteMap } from "@/components/route-map";
 
 const TRIP_ID = "default-trip";
 const COUNTRIES: Array<"all" | RouteCountry> = ["all", "Engeland", "Duitsland"];
 
-type ActivePanel = "routes" | "plan";
+type ActivePanel = "routes" | "plan" | "builder" | "record";
 type MobileSheetMode = "compact" | "half" | "expanded";
 
 type DayPlanItem = {
@@ -56,6 +57,11 @@ type DayPlanItem = {
   startTime: string;
   breakMinutes: number;
   note: string;
+};
+
+type BuilderPoint = RoutePoint & {
+  id: string;
+  name: string;
 };
 
 const REGION_ORDER = ["Lake District", "Wales", "Hoch Sauerland", "Overig"];
@@ -270,6 +276,91 @@ function orderByNearestConnection(routes: GpxRoute[]) {
   return ordered;
 }
 
+function routeDistanceKm(points: RoutePoint[]) {
+  let distanceKm = 0;
+
+  for (let index = 1; index < points.length; index += 1) {
+    distanceKm += distanceKmBetween(points[index - 1], points[index]);
+  }
+
+  return distanceKm;
+}
+
+function routeGeoJson(route: GpxRoute): GeoJSON.Feature {
+  return {
+    type: "Feature",
+    geometry: {
+      type: "LineString",
+      coordinates: route.points.map((point) =>
+        point.ele === undefined ? [point.lng, point.lat] : [point.lng, point.lat, point.ele]
+      )
+    },
+    properties: {
+      points: route.points,
+      waypoints: route.waypoints,
+      pointCount: route.points.length,
+      elevationGainM: Math.round(route.elevationGainM),
+      elevationLossM: Math.round(route.elevationLossM),
+      sourceFile: route.fileName ?? "rallytrail-route"
+    }
+  };
+}
+
+function buildWaypointRoute(
+  points: BuilderPoint[],
+  routeType: RouteType,
+  routedPoints: RoutePoint[],
+  distanceKm = routeDistanceKm(routedPoints)
+): GpxRoute {
+  const createdAt = new Date();
+  const routeLabel = routeType === "roadtrip" ? "Roadtrip route" : "Offroad waypoint route";
+
+  return {
+    id: `waypoint-${Date.now()}`,
+    name: `${routeLabel} ${createdAt.toLocaleDateString("nl-NL")}`,
+    source: "upload",
+    group: routeType === "roadtrip" ? "Eigen roadtrip routes" : "Eigen offroad routes",
+    country: "Onbekend",
+    routeType,
+    fileName: routeType === "roadtrip" ? "waypoint-roadtrip-route" : "waypoint-offroad-route",
+    color: routeType === "roadtrip" ? "#0ea5e9" : "#f97316",
+    points: routedPoints,
+    waypoints: points.map(({ lat, lng, name }) => ({ lat, lng, name })),
+    distanceKm,
+    elevationGainM: 0,
+    elevationLossM: 0
+  };
+}
+
+function buildRecordedRoute(points: RoutePoint[], routeType: RouteType, startedAt: string | null): GpxRoute {
+  const started = startedAt ? new Date(startedAt) : new Date();
+  const dateLabel = `${started.toLocaleDateString("nl-NL")} ${started.toLocaleTimeString("nl-NL", {
+    hour: "2-digit",
+    minute: "2-digit"
+  })}`;
+  const first = points[0];
+  const last = points.at(-1);
+
+  return {
+    id: `recording-${Date.now()}`,
+    name: `Opgenomen ${routeTypeLabel(routeType)} ${dateLabel}`,
+    source: "upload",
+    group: "Opgenomen routes",
+    country: "Onbekend",
+    routeType,
+    fileName: "recorded-track",
+    color: "#e11d48",
+    points,
+    waypoints: [
+      ...(first ? [{ ...first, name: "Start opname" }] : []),
+      ...(last ? [{ ...last, name: "Einde opname" }] : [])
+    ],
+    distanceKm: routeDistanceKm(points),
+    elevationGainM: 0,
+    elevationLossM: 0
+  };
+}
+
 function formatRiderMeta(rider: RiderLocation) {
   const parts: string[] = [];
 
@@ -287,6 +378,7 @@ function formatRiderMeta(rider: RiderLocation) {
 export function TrackerApp() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const sheetDragStartYRef = useRef<number | null>(null);
+  const recordingWatchIdRef = useRef<number | null>(null);
   const [routes, setRoutes] = useState<GpxRoute[]>([]);
   const [dayPlanItems, setDayPlanItems] = useState<DayPlanItem[]>([]);
   const [mapPoints, setMapPoints] = useState<MapPoint[]>([]);
@@ -296,6 +388,17 @@ export function TrackerApp() {
   const [pointNote, setPointNote] = useState("");
   const [pointError, setPointError] = useState<string | null>(null);
   const [mapPickMode, setMapPickMode] = useState(false);
+  const [builderPickMode, setBuilderPickMode] = useState(false);
+  const [builderPoints, setBuilderPoints] = useState<BuilderPoint[]>([]);
+  const [builderRouteType, setBuilderRouteType] = useState<RouteType>("roadtrip");
+  const [builderSaving, setBuilderSaving] = useState(false);
+  const [builderMessage, setBuilderMessage] = useState<string | null>(null);
+  const [recordingActive, setRecordingActive] = useState(false);
+  const [recordingRouteType, setRecordingRouteType] = useState<RouteType>("4x4");
+  const [recordingStartedAt, setRecordingStartedAt] = useState<string | null>(null);
+  const [recordedPoints, setRecordedPoints] = useState<RoutePoint[]>([]);
+  const [recordingSaving, setRecordingSaving] = useState(false);
+  const [recordingMessage, setRecordingMessage] = useState<string | null>(null);
   const [activePanel, setActivePanel] = useState<ActivePanel>("routes");
   const [mobileSheetMode, setMobileSheetMode] = useState<MobileSheetMode>("half");
   const [mobileLiveOpen, setMobileLiveOpen] = useState(false);
@@ -330,7 +433,28 @@ export function TrackerApp() {
         .filter((route): route is GpxRoute => Boolean(route)),
     [overviewRouteIds, routeMap]
   );
-  const visibleMapRoutes = activePanel === "plan" ? plannedRoutes : overviewRoutes;
+  const builderDirectDistanceKm = useMemo(() => routeDistanceKm(builderPoints), [builderPoints]);
+  const builderDraftRoute = useMemo(
+    () =>
+      builderPoints.length > 1
+        ? buildWaypointRoute(builderPoints, builderRouteType, builderPoints, builderDirectDistanceKm)
+        : null,
+    [builderDirectDistanceKm, builderPoints, builderRouteType]
+  );
+  const recordedDistanceKm = useMemo(() => routeDistanceKm(recordedPoints), [recordedPoints]);
+  const recordingDraftRoute = useMemo(
+    () =>
+      recordedPoints.length > 1 ? buildRecordedRoute(recordedPoints, recordingRouteType, recordingStartedAt) : null,
+    [recordedPoints, recordingRouteType, recordingStartedAt]
+  );
+  const visibleMapRoutes =
+    activePanel === "plan"
+      ? plannedRoutes
+      : activePanel === "builder" && builderDraftRoute
+        ? [builderDraftRoute]
+        : activePanel === "record" && recordingDraftRoute
+          ? [recordingDraftRoute]
+          : overviewRoutes;
   const filteredSamples = useMemo(
     () =>
       sampleRoutes.filter((route) =>
@@ -410,6 +534,14 @@ export function TrackerApp() {
   });
 
   useEffect(() => {
+    return () => {
+      if (recordingWatchIdRef.current !== null && "geolocation" in navigator) {
+        navigator.geolocation.clearWatch(recordingWatchIdRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
 
     async function loadRoutes() {
@@ -487,8 +619,11 @@ export function TrackerApp() {
   function openPanel(panel: ActivePanel) {
     setActivePanel(panel);
     setMobileLiveOpen(false);
-    if (panel === "routes") {
+    if (panel !== "plan") {
       setMapPickMode(false);
+    }
+    if (panel !== "builder") {
+      setBuilderPickMode(false);
     }
     if (isMobileViewport() && mobileSheetMode === "compact") {
       setMobileSheetMode("half");
@@ -534,6 +669,37 @@ export function TrackerApp() {
       return existing ? current : [route, ...current];
     });
     setActiveRouteId(route.id);
+  }
+
+  async function saveRouteToSupabase(route: GpxRoute) {
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase || !user) return route;
+
+    const { data, error } = await supabase
+      .from("routes")
+      .insert({
+        owner_id: user.id,
+        name: route.name,
+        country: route.country,
+        route_type: route.routeType,
+        route_group: route.group,
+        file_name: route.fileName,
+        geojson: routeGeoJson(route),
+        distance_km: Number(route.distanceKm.toFixed(3)),
+        elevation_gain_m: Math.round(route.elevationGainM),
+        elevation_loss_m: Math.round(route.elevationLossM),
+        is_public: true
+      })
+      .select("id")
+      .single();
+
+    if (error) throw error;
+
+    return {
+      ...route,
+      id: data.id,
+      source: "supabase" as const
+    };
   }
 
   function addRoutesToPlan(routesToAdd: GpxRoute[]) {
@@ -783,6 +949,7 @@ export function TrackerApp() {
   function toggleMapPickMode() {
     setActivePanel("plan");
     setMobileLiveOpen(false);
+    setBuilderPickMode(false);
     setMapPickMode((current) => !current);
 
     if (isMobileViewport()) {
@@ -791,6 +958,11 @@ export function TrackerApp() {
   }
 
   function addPointFromMapClick(lat: number, lng: number) {
+    if (builderPickMode) {
+      addBuilderPoint(lat, lng);
+      return;
+    }
+
     if (!mapPickMode) return;
 
     setPointCoordinates(formatCoordinate(lat, lng));
@@ -802,6 +974,81 @@ export function TrackerApp() {
       note: pointNote.trim() || undefined,
       source: "manual"
     });
+  }
+
+  function toggleBuilderPickMode() {
+    setActivePanel("builder");
+    setMobileLiveOpen(false);
+    setMapPickMode(false);
+    setBuilderPickMode((current) => !current);
+
+    if (isMobileViewport()) {
+      setMobileSheetMode("compact");
+    }
+  }
+
+  function addBuilderPoint(lat: number, lng: number) {
+    setBuilderPoints((current) => [
+      ...current,
+      {
+        id: `builder-${Date.now()}-${current.length}`,
+        name: `Punt ${current.length + 1}`,
+        lat,
+        lng
+      }
+    ]);
+    setBuilderMessage(null);
+    setActivePanel("builder");
+  }
+
+  function addOwnLocationToBuilder() {
+    if (!ownLocation) return;
+    addBuilderPoint(ownLocation.lat, ownLocation.lng);
+  }
+
+  function removeLastBuilderPoint() {
+    setBuilderPoints((current) => current.slice(0, -1));
+  }
+
+  function clearBuilderPoints() {
+    setBuilderPoints([]);
+    setBuilderMessage(null);
+  }
+
+  async function createRouteFromBuilder() {
+    if (builderPoints.length < 2) {
+      setBuilderMessage("Voeg minimaal twee punten toe.");
+      return;
+    }
+
+    setBuilderSaving(true);
+    setBuilderMessage(builderRouteType === "roadtrip" ? "Route over wegen berekenen..." : "Offroad route maken...");
+
+    try {
+      const directPoints = builderPoints.map(({ lat, lng }) => ({ lat, lng }));
+      const roadRoute = builderRouteType === "roadtrip" ? await buildRoadRoute(directPoints) : null;
+      const draftRoute = buildWaypointRoute(
+        builderPoints,
+        builderRouteType,
+        roadRoute?.points ?? directPoints,
+        roadRoute?.distanceKm
+      );
+      const route = await saveRouteToSupabase(draftRoute);
+
+      upsertRoute(route);
+      setOverviewRouteIds((current) => (current.includes(route.id) ? current : [route.id, ...current]));
+      setBuilderPoints([]);
+      setBuilderPickMode(false);
+      setBuilderMessage(
+        `${routeTypeLabel(route.routeType)} route gemaakt (${formatKm(route.distanceKm)} km)${
+          user ? " en opgeslagen." : ". Login om hem in Supabase te bewaren."
+        }`
+      );
+    } catch (error) {
+      setBuilderMessage(error instanceof Error ? error.message : "Route maken is mislukt.");
+    } finally {
+      setBuilderSaving(false);
+    }
   }
 
   function fillCoordinatesFromOwnLocation() {
@@ -817,6 +1064,108 @@ export function TrackerApp() {
 
   function removeMapPoint(pointId: string) {
     setMapPoints((current) => current.filter((point) => point.id !== pointId));
+  }
+
+  function stopRecordingWatch() {
+    if (recordingWatchIdRef.current !== null && "geolocation" in navigator) {
+      navigator.geolocation.clearWatch(recordingWatchIdRef.current);
+      recordingWatchIdRef.current = null;
+    }
+    setRecordingActive(false);
+  }
+
+  function handleRecordedPosition(position: GeolocationPosition) {
+    const accuracyM = position.coords.accuracy;
+
+    if (Number.isFinite(accuracyM) && accuracyM > 50) {
+      setRecordingMessage(`GPS te onnauwkeurig voor opname (+/-${Math.round(accuracyM)} m).`);
+      return;
+    }
+
+    const point: RoutePoint = {
+      lat: position.coords.latitude,
+      lng: position.coords.longitude,
+      ele:
+        typeof position.coords.altitude === "number" && Number.isFinite(position.coords.altitude)
+          ? position.coords.altitude
+          : undefined,
+      time: new Date(position.timestamp).toISOString()
+    };
+
+    setRecordingMessage(null);
+    setRecordedPoints((current) => {
+      const previous = current.at(-1);
+      if (previous && distanceKmBetween(previous, point) < 0.005) return current;
+
+      return [...current, point];
+    });
+  }
+
+  function startRecording() {
+    if (!("geolocation" in navigator)) {
+      setRecordingMessage("Browser-GPS wordt niet ondersteund.");
+      return;
+    }
+
+    if (recordingWatchIdRef.current !== null) return;
+
+    setActivePanel("record");
+    setMobileLiveOpen(false);
+    setRecordingStartedAt((current) => current ?? new Date().toISOString());
+    setRecordingActive(true);
+    setRecordingMessage("Opname gestart. Wachten op goede GPS...");
+
+    recordingWatchIdRef.current = navigator.geolocation.watchPosition(
+      handleRecordedPosition,
+      (error) => {
+        setRecordingMessage(error.message || "GPS locatie kon niet worden gelezen.");
+        stopRecordingWatch();
+      },
+      {
+        enableHighAccuracy: true,
+        maximumAge: 0,
+        timeout: 15000
+      }
+    );
+  }
+
+  function pauseRecording() {
+    stopRecordingWatch();
+    setRecordingMessage("Opname gepauzeerd.");
+  }
+
+  function resetRecording() {
+    stopRecordingWatch();
+    setRecordingStartedAt(null);
+    setRecordedPoints([]);
+    setRecordingMessage(null);
+  }
+
+  async function saveRecordingRoute() {
+    if (recordedPoints.length < 2) {
+      setRecordingMessage("Rij eerst een stukje met goede GPS.");
+      return;
+    }
+
+    setRecordingSaving(true);
+    setRecordingMessage("Opname opslaan...");
+
+    try {
+      const draftRoute = buildRecordedRoute(recordedPoints, recordingRouteType, recordingStartedAt);
+      const route = await saveRouteToSupabase(draftRoute);
+
+      upsertRoute(route);
+      setOverviewRouteIds((current) => (current.includes(route.id) ? current : [route.id, ...current]));
+      resetRecording();
+      setRecordingMessage(
+        `Opname opgeslagen (${formatKm(route.distanceKm)} km)${user ? "." : ". Login om hem in Supabase te bewaren."}`
+      );
+      setActivePanel("record");
+    } catch (error) {
+      setRecordingMessage(error instanceof Error ? error.message : "Opslaan van opname is mislukt.");
+    } finally {
+      setRecordingSaving(false);
+    }
   }
 
   async function handleUpload(event: ChangeEvent<HTMLInputElement>) {
@@ -875,8 +1224,20 @@ export function TrackerApp() {
         detail: `${formatKm(activeRoute.distanceKm)} km - ${activeRoute.country} - ${routeTypeLabel(activeRoute.routeType)}`
       }
     : {
-        title: activePanel === "routes" ? "Routes" : "Dagschema",
-        detail: `${dayPlanItems.length} etappes - ${formatKm(planStats.distanceKm)} km`
+        title:
+          activePanel === "routes"
+            ? "Routes"
+            : activePanel === "plan"
+              ? "Dagschema"
+              : activePanel === "builder"
+                ? "Route maken"
+                : "Opname",
+        detail:
+          activePanel === "builder"
+            ? `${builderPoints.length} punten - ${formatKm(builderDirectDistanceKm)} km direct`
+            : activePanel === "record"
+              ? `${recordedPoints.length} punten - ${formatKm(recordedDistanceKm)} km`
+              : `${dayPlanItems.length} etappes - ${formatKm(planStats.distanceKm)} km`
       };
 
   return (
@@ -888,7 +1249,7 @@ export function TrackerApp() {
         riders={remoteRiders}
         ownLocation={ownLocation}
         followOwnLocation={followOwnLocation}
-        mapPickMode={mapPickMode}
+        mapPickMode={mapPickMode || builderPickMode}
         onMapClick={addPointFromMapClick}
       />
 
@@ -898,7 +1259,7 @@ export function TrackerApp() {
             <MapPinned size={22} aria-hidden />
           </div>
           <div>
-            <strong>GPX Tracker</strong>
+            <strong>RallyTrail</strong>
             <span>{activeRoute?.name ?? "Geen route geselecteerd"}</span>
           </div>
         </div>
@@ -924,11 +1285,17 @@ export function TrackerApp() {
         </div>
       </header>
 
-      {mapPickMode && (
+      {(mapPickMode || builderPickMode) && (
         <div className="map-pick-banner">
-          <MapPin size={17} aria-hidden />
-          <strong>{mapPointLabel(pointType)}</strong>
-          <button type="button" onClick={() => setMapPickMode(false)}>
+          {builderPickMode ? <RouteIcon size={17} aria-hidden /> : <MapPin size={17} aria-hidden />}
+          <strong>{builderPickMode ? "Waypoint toevoegen" : mapPointLabel(pointType)}</strong>
+          <button
+            type="button"
+            onClick={() => {
+              setMapPickMode(false);
+              setBuilderPickMode(false);
+            }}
+          >
             Annuleer
           </button>
         </div>
@@ -980,8 +1347,24 @@ export function TrackerApp() {
         <section className="panel routes-panel">
           <div className="panel-header">
             <div>
-              <span className="eyebrow">{activePanel === "routes" ? "Routes" : "Planning"}</span>
-              <h1>{activePanel === "routes" ? "Routebibliotheek" : "Dagschema"}</h1>
+              <span className="eyebrow">
+                {activePanel === "routes"
+                  ? "Routes"
+                  : activePanel === "plan"
+                    ? "Planning"
+                    : activePanel === "builder"
+                      ? "Route maken"
+                      : "Opname"}
+              </span>
+              <h1>
+                {activePanel === "routes"
+                  ? "Routebibliotheek"
+                  : activePanel === "plan"
+                    ? "Dagschema"
+                    : activePanel === "builder"
+                      ? "Waypoints"
+                      : "Route opnemen"}
+              </h1>
             </div>
             <button
               type="button"
@@ -1010,6 +1393,22 @@ export function TrackerApp() {
             >
               <ListChecks size={16} aria-hidden />
               <span>Dagschema</span>
+            </button>
+            <button
+              type="button"
+              className={activePanel === "builder" ? "active" : ""}
+              onClick={() => openPanel("builder")}
+            >
+              <RouteIcon size={16} aria-hidden />
+              <span>Maken</span>
+            </button>
+            <button
+              type="button"
+              className={activePanel === "record" ? "active" : ""}
+              onClick={() => openPanel("record")}
+            >
+              <Activity size={16} aria-hidden />
+              <span>Opname</span>
             </button>
           </div>
 
@@ -1228,7 +1627,7 @@ export function TrackerApp() {
               {routeError && <p className="error-text">{routeError}</p>}
               {supabaseRouteError && <p className="error-text">{supabaseRouteError}</p>}
             </div>
-          ) : (
+          ) : activePanel === "plan" ? (
             <div className="plan-view">
               <div className="plan-summary">
                 <div>
@@ -1486,6 +1885,193 @@ export function TrackerApp() {
                   })}
                 </div>
               )}
+            </div>
+          ) : activePanel === "builder" ? (
+            <div className="plan-view">
+              <div className="map-point-panel">
+                <div className="map-point-header">
+                  <div>
+                    <span className="section-label">Waypoint route</span>
+                    <strong>
+                      {builderPoints.length} punten - {formatKm(builderDirectDistanceKm)} km direct
+                    </strong>
+                  </div>
+                  <RouteIcon size={18} aria-hidden />
+                </div>
+
+                <div className="map-point-type-grid two-columns">
+                  {(["roadtrip", "4x4"] as RouteType[]).map((type) => {
+                    const Icon = routeTypeIcon(type);
+
+                    return (
+                      <button
+                        key={type}
+                        type="button"
+                        className={builderRouteType === type ? "map-point-type active" : "map-point-type"}
+                        onClick={() => setBuilderRouteType(type)}
+                        disabled={builderSaving}
+                      >
+                        <Icon size={17} aria-hidden />
+                        <span>{routeTypeLabel(type)}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <button
+                  type="button"
+                  className={builderPickMode ? "control wide-control active" : "control wide-control"}
+                  onClick={toggleBuilderPickMode}
+                  disabled={builderSaving}
+                >
+                  <Crosshair size={16} aria-hidden />
+                  <span>{builderPickMode ? "Waypoint plaatsen actief" : "Waypoints via kaart"}</span>
+                </button>
+
+                <div className="map-point-actions">
+                  <button type="button" className="control" onClick={addOwnLocationToBuilder} disabled={!ownLocation}>
+                    <LocateFixed size={16} aria-hidden />
+                    <span>GPS punt</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="control"
+                    onClick={removeLastBuilderPoint}
+                    disabled={builderPoints.length === 0 || builderSaving}
+                  >
+                    <ArrowDown size={16} aria-hidden />
+                    <span>Undo</span>
+                  </button>
+                </div>
+
+                <div className="map-point-actions">
+                  <button
+                    type="button"
+                    className="control"
+                    onClick={clearBuilderPoints}
+                    disabled={builderPoints.length === 0 || builderSaving}
+                  >
+                    <Trash2 size={16} aria-hidden />
+                    <span>Wis punten</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="control active"
+                    onClick={createRouteFromBuilder}
+                    disabled={builderPoints.length < 2 || builderSaving}
+                  >
+                    <RouteIcon size={16} aria-hidden />
+                    <span>
+                      {builderSaving
+                        ? "Maken..."
+                        : builderRouteType === "roadtrip"
+                          ? "Maak wegenroute"
+                          : "Maak offroad route"}
+                    </span>
+                  </button>
+                </div>
+
+                {builderMessage && <p className="muted-text">{builderMessage}</p>}
+              </div>
+
+              {builderPoints.length === 0 ? (
+                <div className="empty-plan">
+                  <Crosshair size={22} aria-hidden />
+                  <span>Zet waypoint plaatsen aan en klik op de kaart.</span>
+                </div>
+              ) : (
+                <div className="plan-list">
+                  {builderPoints.map((point, index) => (
+                    <div key={point.id} className="map-point-row">
+                      <span className="plan-index">{index + 1}</span>
+                      <span>
+                        <strong>{point.name}</strong>
+                        <small>{formatCoordinate(point.lat, point.lng)}</small>
+                      </span>
+                      <button
+                        type="button"
+                        className="icon-button mini danger"
+                        onClick={() => setBuilderPoints((current) => current.filter((item) => item.id !== point.id))}
+                        title="Punt verwijderen"
+                      >
+                        <Trash2 size={15} aria-hidden />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="plan-view">
+              <div className="map-point-panel">
+                <div className="map-point-header">
+                  <div>
+                    <span className="section-label">Route opnemen</span>
+                    <strong>
+                      {recordedPoints.length} punten - {formatKm(recordedDistanceKm)} km
+                    </strong>
+                  </div>
+                  <Activity size={18} aria-hidden />
+                </div>
+
+                <div className="map-point-type-grid two-columns">
+                  {(["4x4", "roadtrip"] as RouteType[]).map((type) => {
+                    const Icon = routeTypeIcon(type);
+
+                    return (
+                      <button
+                        key={type}
+                        type="button"
+                        className={recordingRouteType === type ? "map-point-type active" : "map-point-type"}
+                        onClick={() => setRecordingRouteType(type)}
+                        disabled={recordingActive || recordingSaving}
+                      >
+                        <Icon size={17} aria-hidden />
+                        <span>{routeTypeLabel(type)}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className={recordingActive ? "recording-card active" : "recording-card"}>
+                  <span>{recordingActive ? "Opname actief" : "Opname klaar"}</span>
+                  <strong>{formatKm(recordedDistanceKm)} km</strong>
+                  <small>Alleen GPS-punten met +/-50 m of beter worden opgenomen.</small>
+                </div>
+
+                <div className="map-point-actions">
+                  <button
+                    type="button"
+                    className={recordingActive ? "control" : "control active"}
+                    onClick={recordingActive ? pauseRecording : startRecording}
+                    disabled={recordingSaving}
+                  >
+                    <Radio size={16} aria-hidden />
+                    <span>{recordingActive ? "Pauzeer" : recordedPoints.length > 0 ? "Hervat" : "Start"}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="control"
+                    onClick={resetRecording}
+                    disabled={recordedPoints.length === 0 || recordingSaving}
+                  >
+                    <Trash2 size={16} aria-hidden />
+                    <span>Wis</span>
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  className="control wide-control active"
+                  onClick={saveRecordingRoute}
+                  disabled={recordedPoints.length < 2 || recordingSaving}
+                >
+                  <FileUp size={16} aria-hidden />
+                  <span>{recordingSaving ? "Opslaan..." : "Sla opname op als route"}</span>
+                </button>
+
+                {recordingMessage && <p className="muted-text">{recordingMessage}</p>}
+              </div>
             </div>
           )}
         </section>

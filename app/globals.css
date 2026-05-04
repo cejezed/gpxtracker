@@ -351,7 +351,7 @@ h2 {
 
 .view-tabs {
   flex: 0 0 auto;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   margin-bottom: 10px;
 }
 
@@ -820,6 +820,10 @@ h2 {
   gap: 6px;
 }
 
+.map-point-type-grid.two-columns {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .map-point-type {
   display: grid;
   min-height: 54px;
@@ -938,6 +942,32 @@ h2 {
 .map-point-row small {
   color: var(--muted);
   font-size: 0.74rem;
+}
+
+.recording-card {
+  display: grid;
+  gap: 4px;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #111827;
+  color: #ffffff;
+}
+
+.recording-card.active {
+  border-color: rgba(225, 29, 72, 0.48);
+  background: #7f1d1d;
+}
+
+.recording-card span,
+.recording-card small {
+  color: rgba(255, 255, 255, 0.76);
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.recording-card strong {
+  font-size: 1.35rem;
 }
 
 .demo-box,

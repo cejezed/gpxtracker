@@ -8,6 +8,9 @@
     "start": "next start",
     "lint": "eslint .",
     "type-check": "tsc --noEmit",
+    "mobile:start": "npm --prefix apps/mobile run start",
+    "mobile:android": "npm --prefix apps/mobile run android",
+    "mobile:type-check": "npm --prefix apps/mobile run type-check",
     "import:gpx": "node scripts/import-gpx-to-supabase.mjs",
     "import:gpx:dry-run": "node scripts/import-gpx-to-supabase.mjs --dry-run"
   },
