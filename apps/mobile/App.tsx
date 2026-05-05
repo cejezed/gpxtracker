@@ -2,12 +2,14 @@ import {
   Camera,
   GeoJSONSource,
   Layer,
-  Map,
+  Map as MapLibreMap,
   Marker,
   type CameraRef,
+  type MapRef,
   type PressEvent,
   type PressEventWithFeatures,
-  type StyleSpecification
+  type StyleSpecification,
+  type ViewStateChangeEvent
 } from "@maplibre/maplibre-react-native";
 import type { RealtimeChannel, Session } from "@supabase/supabase-js";
 import * as Linking from "expo-linking";
@@ -30,11 +32,23 @@ import {
 import { formatKm, formatMeters, loadPublicRoutes } from "./src/routes";
 import { buildRoadRoute } from "./src/routing";
 import { isSupabaseConfigured, supabase } from "./src/supabase";
-import type { GpsQuality, GpxRoute, RiderLocation, RoutePoint, RouteType } from "./src/types";
+import type {
+  GpsQuality,
+  GpxRoute,
+  MapPoint,
+  MapPointType,
+  RiderLocation,
+  RouteCountry,
+  RoutePoint,
+  RouteType
+} from "./src/types";
 
 const TRIP_ID = "default-trip";
 const GOOD_ACCURACY_M = 50;
 const MODERATE_ACCURACY_M = 200;
+const COUNTRIES: Array<"all" | RouteCountry> = ["all", "Engeland", "Duitsland"];
+const REGION_ORDER = ["Lake District", "Wales", "Hoch Sauerland", "Eigen roadtrip routes", "Eigen offroad routes", "Opgenomen routes", "Overig"];
+const MAP_POINT_TYPES: MapPointType[] = ["overnight", "fuel", "food", "viewpoint", "repair", "note"];
 
 const MAP_STYLE: StyleSpecification = {
   version: 8,
@@ -75,10 +89,138 @@ type PlannerPoint = RoutePoint & {
   name: string;
 };
 
-type ActivePanel = "routes" | "planner" | "record" | "live";
+type ActivePanel = "routes" | "plan" | "planner" | "record";
+type SheetMode = "compact" | "half" | "expanded";
+
+type DayPlanItem = {
+  id: string;
+  routeId: string;
+  startTime: string;
+  breakMinutes: number;
+  note: string;
+};
+
+type RouteGroupInfo = {
+  country: RouteCountry;
+  routeType: RouteType;
+  group?: string;
+  name?: string;
+  fileName?: string;
+};
 
 function routeTypeLabel(routeType: RouteType) {
   return routeType === "roadtrip" ? "Roadtrip" : "Offroad";
+}
+
+function normalizeRegionName(group?: string, country?: RouteCountry) {
+  const normalized = group?.trim().toLowerCase().replace(/\s+/g, " ") ?? "";
+
+  if (normalized.includes("lake district")) return "Lake District";
+  if (normalized.includes("wales")) return "Wales";
+  if (normalized.includes("hochsauerland") || normalized.includes("hoch sauerland")) return "Hoch Sauerland";
+  if (country === "Duitsland") return "Hoch Sauerland";
+  if (country === "Engeland") return "Wales";
+
+  return group?.trim() || "Overig";
+}
+
+function routeGroupLabel(route: RouteGroupInfo) {
+  return `${normalizeRegionName(route.group, route.country)} - ${routeTypeLabel(route.routeType)}`;
+}
+
+function sortGroupEntries<T>(entries: Array<[string, T[]]>) {
+  return entries.sort(([a], [b]) => {
+    const regionA = a.split(" - ")[0];
+    const regionB = b.split(" - ")[0];
+    const orderA = REGION_ORDER.indexOf(regionA);
+    const orderB = REGION_ORDER.indexOf(regionB);
+    const normalizedOrderA = orderA === -1 ? REGION_ORDER.length : orderA;
+    const normalizedOrderB = orderB === -1 ? REGION_ORDER.length : orderB;
+
+    if (normalizedOrderA !== normalizedOrderB) return normalizedOrderA - normalizedOrderB;
+    return a.localeCompare(b, "nl");
+  });
+}
+
+function routeMatchesFilters(
+  route: RouteGroupInfo,
+  query: string,
+  countryFilter: "all" | RouteCountry,
+  routeTypeFilter: "all" | RouteType
+) {
+  const haystack = `${route.country} ${route.group ?? ""} ${route.name ?? ""} ${route.fileName ?? ""} ${
+    route.routeType
+  }`.toLowerCase();
+
+  return (
+    haystack.includes(query.toLowerCase()) &&
+    (countryFilter === "all" || route.country === countryFilter) &&
+    (routeTypeFilter === "all" || route.routeType === routeTypeFilter)
+  );
+}
+
+function mapPointLabel(type: MapPointType) {
+  const labels: Record<MapPointType, string> = {
+    overnight: "Overnachting",
+    fuel: "Brandstof",
+    food: "Eten",
+    viewpoint: "Uitzicht",
+    repair: "Service",
+    note: "Notitie"
+  };
+
+  return labels[type];
+}
+
+function mapPointSymbol(type: MapPointType) {
+  const symbols: Record<MapPointType, string> = {
+    overnight: "O",
+    fuel: "B",
+    food: "E",
+    viewpoint: "U",
+    repair: "S",
+    note: "N"
+  };
+
+  return symbols[type];
+}
+
+function mapPointColor(type: MapPointType) {
+  const colors: Record<MapPointType, string> = {
+    overnight: "#7c3aed",
+    fuel: "#0ea5e9",
+    food: "#16a34a",
+    viewpoint: "#f97316",
+    repair: "#475569",
+    note: "#e11d48"
+  };
+
+  return colors[type];
+}
+
+function parseCoordinateInput(input: string) {
+  const matches = Array.from(input.matchAll(/([NSEW])?\s*([+-]?\d+(?:[.,]\d+)?)\s*([NSEW])?/gi));
+
+  if (matches.length < 2) return null;
+
+  const values = matches.slice(0, 2).map((match) => {
+    const direction = `${match[1] ?? ""}${match[3] ?? ""}`.toUpperCase();
+    const numeric = Number.parseFloat(match[2].replace(",", "."));
+
+    if (!Number.isFinite(numeric)) return Number.NaN;
+    if (direction.includes("S") || direction.includes("W")) return -Math.abs(numeric);
+    return numeric;
+  });
+
+  const [lat, lng] = values;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+
+  return { lat, lng };
+}
+
+function formatCoordinate(lat: number, lng: number) {
+  return `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
 }
 
 function gpsQualityFromAccuracy(accuracyM?: number): GpsQuality {
@@ -166,6 +308,65 @@ function routeDistanceKm(points: RoutePoint[]) {
   return totalMeters / 1000;
 }
 
+function estimateRouteMinutes(route: GpxRoute) {
+  const speedKmh = route.routeType === "roadtrip" ? 50 : 18;
+  return Math.max(10, Math.round((route.distanceKm / speedKmh) * 60));
+}
+
+function formatDuration(minutes: number) {
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+
+  if (hours === 0) return `${remainder} min`;
+  if (remainder === 0) return `${hours} u`;
+  return `${hours} u ${remainder} min`;
+}
+
+function addMinutesToTime(time: string, minutes: number) {
+  const [hours, rawMinutes] = time.split(":").map((part) => Number.parseInt(part, 10));
+  if (!Number.isFinite(hours) || !Number.isFinite(rawMinutes)) return "";
+
+  const total = (hours * 60 + rawMinutes + minutes) % (24 * 60);
+  const nextHours = Math.floor(total / 60);
+  const nextMinutes = total % 60;
+
+  return `${String(nextHours).padStart(2, "0")}:${String(nextMinutes).padStart(2, "0")}`;
+}
+
+function connectionDistanceKm(previous: GpxRoute, next: GpxRoute) {
+  const previousEnd = previous.points[previous.points.length - 1];
+  const nextStart = next.points[0];
+
+  if (!previousEnd || !nextStart) return 0;
+  return distanceMeters(previousEnd, nextStart) / 1000;
+}
+
+function orderByNearestConnection(routes: GpxRoute[]) {
+  if (routes.length <= 2) return routes;
+
+  const ordered = [routes[0]];
+  const remaining = routes.slice(1);
+
+  while (remaining.length > 0) {
+    const previous = ordered[ordered.length - 1];
+    let nearestIndex = 0;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+
+    remaining.forEach((route, index) => {
+      const distance = connectionDistanceKm(previous, route);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = index;
+      }
+    });
+
+    const [nearest] = remaining.splice(nearestIndex, 1);
+    ordered.push(nearest);
+  }
+
+  return ordered;
+}
+
 function routeLine(route: GpxRoute): GeoJSON.FeatureCollection {
   return {
     type: "FeatureCollection",
@@ -200,6 +401,39 @@ function pointsLine(points: RoutePoint[], name: string): GeoJSON.FeatureCollecti
         }
       }
     ]
+  };
+}
+
+function connectionLines(routes: GpxRoute[]): GeoJSON.FeatureCollection {
+  const features: GeoJSON.Feature[] = [];
+
+  for (let index = 1; index < routes.length; index += 1) {
+    const previous = routes[index - 1];
+    const current = routes[index];
+    const previousEnd = previous.points[previous.points.length - 1];
+    const currentStart = current.points[0];
+
+    if (!previousEnd || !currentStart) continue;
+
+    features.push({
+      type: "Feature",
+      properties: {
+        id: `${previous.id}-${current.id}`,
+        distanceKm: connectionDistanceKm(previous, current)
+      },
+      geometry: {
+        type: "LineString",
+        coordinates: [
+          [previousEnd.lng, previousEnd.lat],
+          [currentStart.lng, currentStart.lat]
+        ]
+      }
+    });
+  }
+
+  return {
+    type: "FeatureCollection",
+    features
   };
 }
 
@@ -283,9 +517,22 @@ function parseAuthParams(url: string) {
 }
 
 export default function App() {
+  const mapRef = useRef<MapRef>(null);
   const cameraRef = useRef<CameraRef>(null);
   const channelRef = useRef<RealtimeChannel | null>(null);
   const [routes, setRoutes] = useState<GpxRoute[]>([]);
+  const [dayPlanItems, setDayPlanItems] = useState<DayPlanItem[]>([]);
+  const [mapPoints, setMapPoints] = useState<MapPoint[]>([]);
+  const [pointType, setPointType] = useState<MapPointType>("overnight");
+  const [pointName, setPointName] = useState("Overnachting");
+  const [pointCoordinates, setPointCoordinates] = useState("");
+  const [pointNote, setPointNote] = useState("");
+  const [pointError, setPointError] = useState<string | null>(null);
+  const [mapPickMode, setMapPickMode] = useState(false);
+  const [overviewRouteIds, setOverviewRouteIds] = useState<string[]>([]);
+  const [countryFilter, setCountryFilter] = useState<"all" | RouteCountry>("all");
+  const [routeTypeFilter, setRouteTypeFilter] = useState<"all" | RouteType>("all");
+  const [query, setQuery] = useState("");
   const [activeRouteId, setActiveRouteId] = useState<string | null>(null);
   const [routesLoading, setRoutesLoading] = useState(false);
   const [routeError, setRouteError] = useState<string | null>(null);
@@ -297,6 +544,11 @@ export default function App() {
   const [remoteRiders, setRemoteRiders] = useState<RiderLocation[]>([]);
   const [locationMessage, setLocationMessage] = useState("GPS starten...");
   const [activePanel, setActivePanel] = useState<ActivePanel>("routes");
+  const [sheetMode, setSheetMode] = useState<SheetMode>("half");
+  const [livePanelOpen, setLivePanelOpen] = useState(false);
+  const [zoomLevel, setZoomLevel] = useState(9);
+  const [activeRouteDetailsOpen, setActiveRouteDetailsOpen] = useState(false);
+  const [expandedRouteGroups, setExpandedRouteGroups] = useState<Record<string, boolean>>({});
   const [plannerEnabled, setPlannerEnabled] = useState(false);
   const [plannerPoints, setPlannerPoints] = useState<PlannerPoint[]>([]);
   const [plannerRouteType, setPlannerRouteType] = useState<RouteType>("roadtrip");
@@ -315,7 +567,51 @@ export default function App() {
     [activeRouteId, routes]
   );
 
-  const activeRouteLine = useMemo(() => (activeRoute ? routeLine(activeRoute) : null), [activeRoute]);
+  const routeMap = useMemo(() => new Map(routes.map((route) => [route.id, route])), [routes]);
+
+  const filteredRoutes = useMemo(
+    () => routes.filter((route) => routeMatchesFilters(route, query, countryFilter, routeTypeFilter)),
+    [countryFilter, query, routeTypeFilter, routes]
+  );
+
+  const groupedRoutes = useMemo(() => {
+    return filteredRoutes.reduce<Record<string, GpxRoute[]>>((groups, route) => {
+      const label = routeGroupLabel(route);
+      groups[label] = [...(groups[label] ?? []), route];
+      return groups;
+    }, {});
+  }, [filteredRoutes]);
+
+  const sortedRouteGroups = useMemo(() => sortGroupEntries(Object.entries(groupedRoutes)), [groupedRoutes]);
+
+  const activeRouteGroup = activeRoute ? routeGroupLabel(activeRoute) : null;
+
+  const plannedRoutes = useMemo(
+    () =>
+      dayPlanItems
+        .map((item) => routeMap.get(item.routeId))
+        .filter((route): route is GpxRoute => Boolean(route)),
+    [dayPlanItems, routeMap]
+  );
+
+  const overviewRoutes = useMemo(
+    () =>
+      overviewRouteIds
+        .map((routeId) => routeMap.get(routeId))
+        .filter((route): route is GpxRoute => Boolean(route)),
+    [overviewRouteIds, routeMap]
+  );
+
+  const visibleMapRoutes = useMemo(() => {
+    if (activePanel === "plan" && plannedRoutes.length > 0) return plannedRoutes;
+    if (overviewRoutes.length > 0) return overviewRoutes;
+    return activeRoute ? [activeRoute] : [];
+  }, [activePanel, activeRoute, overviewRoutes, plannedRoutes]);
+
+  const visibleConnectionLine = useMemo(
+    () => (visibleMapRoutes.length > 1 ? connectionLines(visibleMapRoutes) : null),
+    [visibleMapRoutes]
+  );
 
   const plannerLine = useMemo(
     () => (plannerPoints.length > 1 ? pointsLine(plannerPoints, "Waypoint route") : null),
@@ -329,6 +625,49 @@ export default function App() {
   const recordedLine = useMemo(
     () => (recordedPoints.length > 1 ? pointsLine(recordedPoints, "Opgenomen route") : null),
     [recordedPoints]
+  );
+
+  const routeTypeCounts = useMemo(
+    () => ({
+      "4x4": routes.filter((route) => route.routeType === "4x4").length,
+      roadtrip: routes.filter((route) => route.routeType === "roadtrip").length
+    }),
+    [routes]
+  );
+
+  const planStats = useMemo(() => {
+    const driveMinutes = plannedRoutes.reduce((total, route) => total + estimateRouteMinutes(route), 0);
+    const breakMinutes = dayPlanItems.reduce((total, item) => total + item.breakMinutes, 0);
+
+    return {
+      distanceKm: plannedRoutes.reduce((total, route) => total + route.distanceKm, 0),
+      elevationGainM: plannedRoutes.reduce((total, route) => total + route.elevationGainM, 0),
+      driveMinutes,
+      breakMinutes,
+      totalMinutes: driveMinutes + breakMinutes
+    };
+  }, [dayPlanItems, plannedRoutes]);
+
+  const overviewConnections = useMemo(
+    () =>
+      overviewRoutes.slice(1).map((route, index) => {
+        const previous = overviewRoutes[index];
+        return {
+          id: `${previous.id}-${route.id}`,
+          from: previous.name,
+          to: route.name,
+          distanceKm: connectionDistanceKm(previous, route)
+        };
+      }),
+    [overviewRoutes]
+  );
+
+  const overviewStats = useMemo(
+    () => ({
+      routeDistanceKm: overviewRoutes.reduce((total, route) => total + route.distanceKm, 0),
+      connectionDistanceKm: overviewConnections.reduce((total, connection) => total + connection.distanceKm, 0)
+    }),
+    [overviewConnections, overviewRoutes]
   );
 
   const navigationWaypoints = useMemo(() => {
@@ -358,14 +697,6 @@ export default function App() {
     return normalizeBearing(bearingDegrees(ownLocation, targetWaypoint));
   }, [ownLocation, targetWaypoint]);
 
-  const groupedRoutes = useMemo(() => {
-    return routes.reduce<Record<string, GpxRoute[]>>((groups, route) => {
-      const label = route.group ?? `${route.country} - ${routeTypeLabel(route.routeType)}`;
-      groups[label] = [...(groups[label] ?? []), route];
-      return groups;
-    }, {});
-  }, [routes]);
-
   const addPlannerPoint = useCallback((lat: number, lng: number) => {
     setPlannerPoints((current) => [
       ...current,
@@ -377,16 +708,39 @@ export default function App() {
       }
     ]);
     setActivePanel("planner");
+    setSheetMode("half");
   }, []);
 
   const handleMapPress = useCallback(
     (event: NativeSyntheticEvent<PressEvent | PressEventWithFeatures>) => {
-      if (!plannerEnabled) return;
-
       const [lng, lat] = event.nativeEvent.lngLat;
-      addPlannerPoint(lat, lng);
+
+      if (plannerEnabled) {
+        addPlannerPoint(lat, lng);
+        return;
+      }
+
+      if (mapPickMode) {
+        setMapPoints((current) => [
+          ...current,
+          {
+            id: `point-${Date.now()}-${current.length}`,
+            name: pointName.trim() || mapPointLabel(pointType),
+            type: pointType,
+            lat,
+            lng,
+            note: pointNote.trim() || undefined,
+            source: "manual"
+          }
+        ]);
+        setPointCoordinates(formatCoordinate(lat, lng));
+        setPointError(null);
+        setMapPickMode(false);
+        setActivePanel("plan");
+        setSheetMode("half");
+      }
     },
-    [addPlannerPoint, plannerEnabled]
+    [addPlannerPoint, mapPickMode, plannerEnabled, pointName, pointNote, pointType]
   );
 
   const refreshRoutes = useCallback(async () => {
@@ -634,17 +988,19 @@ export default function App() {
   }, [displayName, ownLocation, session?.user]);
 
   useEffect(() => {
-    if (!activeRoute || !cameraRef.current) return;
+    if (visibleMapRoutes.length === 0 || !cameraRef.current) return;
 
-    const bounds = routeBounds(activeRoute.points);
+    const bounds = routeBounds(visibleMapRoutes.flatMap((route) => route.points));
     if (!Number.isFinite(bounds.west) || !Number.isFinite(bounds.south)) return;
 
+    const bottomPadding = sheetMode === "compact" ? 140 : sheetMode === "half" ? 340 : 610;
+
     cameraRef.current.fitBounds([bounds.west, bounds.south, bounds.east, bounds.north], {
-      padding: { top: 90, right: 40, bottom: 330, left: 40 },
+      padding: { top: 120, right: 48, bottom: bottomPadding, left: 48 },
       duration: 700,
       easing: "ease"
     });
-  }, [activeRoute]);
+  }, [sheetMode, visibleMapRoutes]);
 
   async function handleMagicLink() {
     if (!supabase || !email.trim()) return;
@@ -676,6 +1032,237 @@ export default function App() {
       duration: 500,
       easing: "ease"
     });
+  }
+
+  async function changeZoom(delta: number) {
+    const currentZoom = await mapRef.current?.getZoom().catch(() => zoomLevel);
+    const nextZoom = Math.max(3, Math.min(19, (currentZoom ?? zoomLevel) + delta));
+    setZoomLevel(nextZoom);
+    cameraRef.current?.zoomTo(nextZoom, { duration: 180, easing: "ease" });
+  }
+
+  function openPanel(panel: ActivePanel) {
+    setActivePanel(panel);
+    setLivePanelOpen(false);
+
+    if (panel !== "plan") {
+      setMapPickMode(false);
+    }
+
+    if (panel !== "planner") {
+      setPlannerEnabled(false);
+    }
+
+    if (sheetMode === "compact") {
+      setSheetMode("half");
+    }
+  }
+
+  function cycleSheetMode() {
+    setSheetMode((current) => (current === "compact" ? "half" : current === "half" ? "expanded" : "compact"));
+  }
+
+  function toggleRouteGroup(group: string) {
+    setExpandedRouteGroups((current) => ({
+      ...current,
+      [group]: !(current[group] ?? group === activeRouteGroup)
+    }));
+  }
+
+  function selectRoute(route: GpxRoute) {
+    setActiveRouteId(route.id);
+    setTargetWaypointIndex(0);
+    setExpandedRouteGroups((current) => ({ ...current, [routeGroupLabel(route)]: true }));
+  }
+
+  function isRouteInOverview(routeId: string) {
+    return overviewRouteIds.includes(routeId);
+  }
+
+  function toggleRouteInOverview(route: GpxRoute) {
+    setOverviewRouteIds((current) =>
+      current.includes(route.id) ? current.filter((routeId) => routeId !== route.id) : [...current, route.id]
+    );
+    selectRoute(route);
+  }
+
+  function selectVisibleRoutesForOverview() {
+    setOverviewRouteIds((current) => {
+      const next = [...current];
+
+      filteredRoutes.forEach((route) => {
+        if (!next.includes(route.id)) next.push(route.id);
+      });
+
+      return next;
+    });
+
+    if (filteredRoutes[0]) {
+      selectRoute(filteredRoutes[0]);
+    }
+
+    setSheetMode("compact");
+  }
+
+  function sortOverviewByNearest() {
+    setOverviewRouteIds(orderByNearestConnection(overviewRoutes).map((route) => route.id));
+  }
+
+  function suggestedStartTime(currentItems: DayPlanItem[]) {
+    if (currentItems.length === 0) return "09:00";
+
+    const lastItem = currentItems[currentItems.length - 1];
+    const lastRoute = routeMap.get(lastItem.routeId);
+    if (!lastRoute || !lastItem.startTime) return "";
+
+    return addMinutesToTime(lastItem.startTime, estimateRouteMinutes(lastRoute) + lastItem.breakMinutes);
+  }
+
+  function addRoutesToPlan(routesToAdd: GpxRoute[]) {
+    if (routesToAdd.length === 0) return;
+
+    setDayPlanItems((current) => {
+      const next = [...current];
+
+      routesToAdd.forEach((route, index) => {
+        if (next.some((item) => item.routeId === route.id)) return;
+
+        next.push({
+          id: `plan-${route.id}-${Date.now()}-${index}`,
+          routeId: route.id,
+          startTime: suggestedStartTime(next),
+          breakMinutes: next.length === 0 ? 0 : 15,
+          note: ""
+        });
+      });
+
+      return next;
+    });
+
+    selectRoute(routesToAdd[0]);
+    setActivePanel("plan");
+    setSheetMode("half");
+  }
+
+  function addRouteToPlan(route: GpxRoute) {
+    addRoutesToPlan([route]);
+  }
+
+  function addOverviewToPlan() {
+    addRoutesToPlan(overviewRoutes);
+  }
+
+  function updatePlanItem(itemId: string, patch: Partial<DayPlanItem>) {
+    setDayPlanItems((current) => current.map((item) => (item.id === itemId ? { ...item, ...patch } : item)));
+  }
+
+  function movePlanItem(itemId: string, direction: -1 | 1) {
+    setDayPlanItems((current) => {
+      const index = current.findIndex((item) => item.id === itemId);
+      const targetIndex = index + direction;
+
+      if (index < 0 || targetIndex < 0 || targetIndex >= current.length) return current;
+
+      const next = [...current];
+      const [item] = next.splice(index, 1);
+      next.splice(targetIndex, 0, item);
+      return next;
+    });
+  }
+
+  function removePlanItem(itemId: string) {
+    setDayPlanItems((current) => current.filter((item) => item.id !== itemId));
+  }
+
+  function buildPointName() {
+    return pointName.trim() || mapPointLabel(pointType);
+  }
+
+  function addMapPoint(point: Omit<MapPoint, "id">) {
+    setMapPoints((current) => [
+      ...current,
+      {
+        ...point,
+        id: `point-${Date.now()}-${current.length}`
+      }
+    ]);
+    setPointError(null);
+    setMapPickMode(false);
+    setActivePanel("plan");
+    setSheetMode("half");
+  }
+
+  function toggleMapPickMode() {
+    setActivePanel("plan");
+    setPlannerEnabled(false);
+    setMapPickMode((current) => !current);
+    setSheetMode("compact");
+  }
+
+  function addPointAtOwnLocation() {
+    if (!ownLocation) {
+      Alert.alert("Geen GPS", "RallyTrail heeft nog geen locatie ontvangen.");
+      return;
+    }
+
+    addMapPoint({
+      name: buildPointName(),
+      type: pointType,
+      lat: ownLocation.lat,
+      lng: ownLocation.lng,
+      note: pointNote.trim() || (ownLocation.accuracyM ? `GPS +/-${Math.round(ownLocation.accuracyM)} m` : undefined),
+      source: "own-location"
+    });
+  }
+
+  function addPointAtRouteEnd() {
+    const lastPoint = activeRoute?.points[activeRoute.points.length - 1];
+    if (!lastPoint) {
+      Alert.alert("Geen route", "Selecteer eerst een route.");
+      return;
+    }
+
+    addMapPoint({
+      name: buildPointName(),
+      type: pointType,
+      lat: lastPoint.lat,
+      lng: lastPoint.lng,
+      note: pointNote.trim() || `Eindpunt ${activeRoute.name}`,
+      source: "route-end"
+    });
+  }
+
+  function addPointFromCoordinates() {
+    const parsed = parseCoordinateInput(pointCoordinates);
+
+    if (!parsed) {
+      setPointError("Gebruik bijvoorbeeld: 52.196562, -3.749340");
+      return;
+    }
+
+    addMapPoint({
+      name: buildPointName(),
+      type: pointType,
+      lat: parsed.lat,
+      lng: parsed.lng,
+      note: pointNote.trim() || undefined,
+      source: "manual"
+    });
+  }
+
+  function fillCoordinatesFromOwnLocation() {
+    if (!ownLocation) return;
+    setPointCoordinates(formatCoordinate(ownLocation.lat, ownLocation.lng));
+  }
+
+  function fillCoordinatesFromRouteEnd() {
+    const lastPoint = activeRoute?.points[activeRoute.points.length - 1];
+    if (!lastPoint) return;
+    setPointCoordinates(formatCoordinate(lastPoint.lat, lastPoint.lng));
+  }
+
+  function removeMapPoint(pointId: string) {
+    setMapPoints((current) => current.filter((point) => point.id !== pointId));
   }
 
   function addOwnLocationAsPoint() {
@@ -744,6 +1331,7 @@ export default function App() {
       const route = await saveRoute(draftRoute);
 
       setRoutes((current) => [route, ...current]);
+      setOverviewRouteIds((current) => (current.includes(route.id) ? current : [route.id, ...current]));
       setActiveRouteId(route.id);
       setTargetWaypointIndex(0);
       setPlannerPoints([]);
@@ -797,6 +1385,7 @@ export default function App() {
       const route = await saveRoute(draftRoute);
 
       setRoutes((current) => [route, ...current]);
+      setOverviewRouteIds((current) => (current.includes(route.id) ? current : [route.id, ...current]));
       setActiveRouteId(route.id);
       setTargetWaypointIndex(0);
       setRecordingActive(false);
@@ -826,11 +1415,36 @@ export default function App() {
   const routeCount = routes.length;
   const visibleRemoteRiders = session?.user ? remoteRiders : [];
   const liveCount = visibleRemoteRiders.length + (ownLocation ? 1 : 0);
+  const gpsNeedsAttention = !ownLocation || ownLocation.gpsQuality !== "good";
+  const sheetSummary = activeRoute
+    ? {
+        title: activeRoute.name,
+        detail: `${formatKm(activeRoute.distanceKm)} km | ${activeRoute.country} | ${routeTypeLabel(activeRoute.routeType)}`
+      }
+    : {
+        title:
+          activePanel === "routes"
+            ? "Routes"
+            : activePanel === "plan"
+              ? "Dagschema"
+              : activePanel === "planner"
+                ? "Route maken"
+                : "Opname",
+        detail:
+          activePanel === "plan"
+            ? `${dayPlanItems.length} etappes | ${mapPoints.length} punten`
+            : activePanel === "planner"
+              ? `${plannerPoints.length} waypoints | ${formatKm(plannerDistanceKm)} km direct`
+              : activePanel === "record"
+                ? `${recordedPoints.length} punten | ${formatKm(recordedDistanceKm)} km`
+                : `${routeCount} routes`
+      };
 
   return (
     <View style={styles.screen}>
       <StatusBar style="light" />
-      <Map
+      <MapLibreMap
+        ref={mapRef}
         style={styles.map}
         mapStyle={MAP_STYLE}
         logo={false}
@@ -838,30 +1452,51 @@ export default function App() {
         attributionPosition={{ bottom: 10, right: 10 }}
         compassPosition={{ top: 88, right: 16 }}
         onPress={handleMapPress}
+        onRegionDidChange={(event: NativeSyntheticEvent<ViewStateChangeEvent>) => setZoomLevel(event.nativeEvent.zoom)}
       >
         <Camera ref={cameraRef} initialViewState={{ center: DEFAULT_CENTER, zoom: 9 }} />
 
-        {activeRouteLine && activeRoute ? (
-          <GeoJSONSource id="active-route" data={activeRouteLine}>
+        {visibleMapRoutes.map((route, index) => {
+          const isActive = route.id === activeRoute?.id || (!activeRoute && index === 0);
+
+          return (
+            <GeoJSONSource key={`${route.id}-${index}`} id={`route-${index}`} data={routeLine(route)}>
+              <Layer
+                id={`route-${index}-shadow`}
+                type="line"
+                style={{
+                  lineColor: "#111827",
+                  lineOpacity: isActive ? 0.72 : 0.32,
+                  lineWidth: isActive ? 8 : 5,
+                  lineCap: "round",
+                  lineJoin: "round"
+                }}
+              />
+              <Layer
+                id={`route-${index}-line`}
+                type="line"
+                style={{
+                  lineColor: route.color,
+                  lineOpacity: isActive ? 1 : 0.66,
+                  lineWidth: isActive ? 4 : 3,
+                  lineCap: "round",
+                  lineJoin: "round"
+                }}
+              />
+            </GeoJSONSource>
+          );
+        })}
+
+        {visibleConnectionLine ? (
+          <GeoJSONSource id="route-connections" data={visibleConnectionLine}>
             <Layer
-              id="active-route-shadow"
+              id="route-connections-line"
               type="line"
               style={{
                 lineColor: "#111827",
-                lineOpacity: 0.72,
-                lineWidth: 8,
-                lineCap: "round",
-                lineJoin: "round"
-              }}
-            />
-            <Layer
-              id="active-route-line"
-              type="line"
-              style={{
-                lineColor: activeRoute.color,
-                lineWidth: 4,
-                lineCap: "round",
-                lineJoin: "round"
+                lineOpacity: 0.46,
+                lineWidth: 2,
+                lineDasharray: [2, 2]
               }}
             />
           </GeoJSONSource>
@@ -922,6 +1557,15 @@ export default function App() {
           </Marker>
         ))}
 
+        {mapPoints.map((point, index) => (
+          <Marker key={point.id} id={point.id} lngLat={[point.lng, point.lat]}>
+            <View style={[styles.mapPointMarker, { backgroundColor: mapPointColor(point.type) }]}>
+              <Text style={styles.mapPointMarkerText}>{mapPointSymbol(point.type)}</Text>
+              <Text style={styles.mapPointIndex}>{index + 1}</Text>
+            </View>
+          </Marker>
+        ))}
+
         {ownLocation ? (
           <Marker id="own-location" lngLat={[ownLocation.lng, ownLocation.lat]}>
             <View
@@ -945,39 +1589,26 @@ export default function App() {
             </View>
           </Marker>
         ))}
-      </Map>
+      </MapLibreMap>
 
       <View style={styles.topBar}>
-        <View>
+        <View style={styles.topInfo}>
           <Text style={styles.appName}>RallyTrail</Text>
-          <Text style={styles.statusText}>
-            {routeCount} routes | {liveCount} live
+          <Text style={styles.statusText} numberOfLines={1}>
+            {routeCount} routes | {gpsQualityLabel(ownLocation?.gpsQuality ?? "searching", ownLocation?.accuracyM)} |{" "}
+            {liveCount} live
             {recordingActive ? ` | REC ${formatKm(recordedDistanceKm)} km` : ""}
           </Text>
         </View>
         <View style={styles.topActions}>
           <Pressable
-            style={[styles.recordButton, recordingActive && styles.recordButtonActive]}
+            style={[styles.liveButton, livePanelOpen && styles.liveButtonActive]}
             onPress={() => {
-              if (recordingActive) {
-                pauseRecording();
-              } else {
-                startRecording();
-              }
+              setLivePanelOpen((current) => !current);
+              if (sheetMode === "compact") setSheetMode("half");
             }}
           >
-            <Text style={[styles.recordButtonText, recordingActive && styles.recordButtonTextActive]}>
-              {recordingActive ? "Stop" : "Rec"}
-            </Text>
-          </Pressable>
-          <Pressable
-            style={[styles.planButton, plannerEnabled && styles.planButtonActive]}
-            onPress={() => {
-              setPlannerEnabled((current) => !current);
-              setActivePanel("planner");
-            }}
-          >
-            <Text style={[styles.planButtonText, plannerEnabled && styles.planButtonTextActive]}>Plan</Text>
+            <Text style={[styles.liveButtonText, livePanelOpen && styles.liveButtonTextActive]}>Live</Text>
           </Pressable>
           <Pressable style={styles.locationButton} onPress={centerOnOwnLocation}>
             <Text style={styles.locationButtonText}>GPS</Text>
@@ -985,88 +1616,551 @@ export default function App() {
         </View>
       </View>
 
-      <View style={styles.gpsBadge}>
-        <Text style={[styles.gpsBadgeText, { color: markerColor(ownLocation?.gpsQuality) }]}>{locationMessage}</Text>
-        <Text style={styles.gpsBadgeSub}>
-          Live delen pas bij GPS goed ({GOOD_ACCURACY_M} m of beter)
-        </Text>
+      {gpsNeedsAttention ? (
+        <View style={styles.gpsBadge}>
+          <Text style={[styles.gpsBadgeText, { color: markerColor(ownLocation?.gpsQuality) }]}>{locationMessage}</Text>
+          <Text style={styles.gpsBadgeSub}>Live delen start bij GPS goed ({GOOD_ACCURACY_M} m of beter).</Text>
+        </View>
+      ) : null}
+
+      {(mapPickMode || plannerEnabled) && (
+        <View style={styles.mapModeBadge}>
+          <Text style={styles.mapModeText}>
+            {plannerEnabled ? "Tik op de kaart voor waypoints" : `${mapPointLabel(pointType)} plaatsen`}
+          </Text>
+          <Pressable
+            style={styles.mapModeCancel}
+            onPress={() => {
+              setMapPickMode(false);
+              setPlannerEnabled(false);
+            }}
+          >
+            <Text style={styles.mapModeCancelText}>Stop</Text>
+          </Pressable>
+        </View>
+      )}
+
+      <View style={styles.zoomControls}>
+        <Pressable style={styles.zoomButton} onPress={() => void changeZoom(1)}>
+          <Text style={styles.zoomButtonText}>+</Text>
+        </Pressable>
+        <Pressable style={styles.zoomButton} onPress={() => void changeZoom(-1)}>
+          <Text style={styles.zoomButtonText}>-</Text>
+        </Pressable>
       </View>
 
-      <View style={styles.sheet}>
-        <View style={styles.panelTabs}>
-          {(["routes", "planner", "record", "live"] as ActivePanel[]).map((panel) => (
+      {livePanelOpen ? (
+        <View style={styles.liveOverlay}>
+          <View style={styles.liveOverlayHeader}>
+            <Text style={styles.liveOverlayTitle}>Live groep</Text>
+            <Pressable style={styles.closeButton} onPress={() => setLivePanelOpen(false)}>
+              <Text style={styles.closeButtonText}>x</Text>
+            </Pressable>
+          </View>
+          {session?.user ? (
+            <>
+              <Text style={styles.mutedText}>Ingelogd als {session.user.email ?? "rijder"}</Text>
+              <TextInput
+                value={displayName}
+                onChangeText={setDisplayName}
+                placeholder="Naam op de kaart"
+                placeholderTextColor="#6b7280"
+                style={styles.input}
+              />
+              <Pressable style={styles.secondaryButton} onPress={handleSignOut}>
+                <Text style={styles.secondaryButtonText}>Uitloggen</Text>
+              </Pressable>
+            </>
+          ) : (
+            <>
+              <Text style={styles.mutedText}>Login is nodig om je locatie te delen.</Text>
+              <TextInput
+                value={email}
+                onChangeText={setEmail}
+                autoCapitalize="none"
+                keyboardType="email-address"
+                placeholder="email@example.com"
+                placeholderTextColor="#6b7280"
+                style={styles.input}
+              />
+              <Pressable
+                style={[styles.primaryButton, (!isSupabaseConfigured || !email.trim()) && styles.disabledButton]}
+                disabled={!isSupabaseConfigured || !email.trim()}
+                onPress={handleMagicLink}
+              >
+                <Text style={styles.primaryButtonText}>Stuur magic link</Text>
+              </Pressable>
+            </>
+          )}
+          {authMessage ? <Text style={styles.mutedText}>{authMessage}</Text> : null}
+          <View style={styles.riderList}>
+            {[ownLocation, ...visibleRemoteRiders].filter(Boolean).map((rider) => (
+              <Text key={rider!.userId} style={styles.mutedText}>
+                {rider!.name} | {gpsQualityLabel(rider!.gpsQuality ?? "searching", rider!.accuracyM)}
+              </Text>
+            ))}
+          </View>
+        </View>
+      ) : null}
+
+      <View
+        style={[
+          styles.sheet,
+          sheetMode === "compact" && styles.sheetCompact,
+          sheetMode === "half" && styles.sheetHalf,
+          sheetMode === "expanded" && styles.sheetExpanded
+        ]}
+      >
+        <View style={styles.sheetHeader}>
+          <Pressable style={styles.sheetHandle} onPress={cycleSheetMode}>
+            <View style={styles.sheetGrip} />
+            <View style={styles.sheetSummary}>
+              <Text style={styles.sheetSummaryTitle} numberOfLines={1}>
+                {sheetSummary.title}
+              </Text>
+              <Text style={styles.sheetSummaryDetail} numberOfLines={1}>
+                {sheetSummary.detail}
+              </Text>
+            </View>
+          </Pressable>
+          <View style={styles.sheetActions}>
+            <Pressable style={styles.sheetActionButton} onPress={() => setSheetMode("compact")}>
+              <Text style={styles.sheetActionText}>Kaart</Text>
+            </Pressable>
+            <Pressable
+              style={styles.sheetActionButton}
+              onPress={() => setSheetMode((current) => (current === "expanded" ? "half" : "expanded"))}
+            >
+              <Text style={styles.sheetActionText}>{sheetMode === "expanded" ? "Half" : "Groot"}</Text>
+            </Pressable>
+          </View>
+        </View>
+
+        {sheetMode !== "compact" ? (
+          <>
+            <View style={styles.panelTabs}>
+              {(["routes", "plan", "planner", "record"] as ActivePanel[]).map((panel) => (
             <Pressable
               key={panel}
               style={[styles.panelTab, activePanel === panel && styles.panelTabActive]}
-              onPress={() => setActivePanel(panel)}
+              onPress={() => openPanel(panel)}
             >
               <Text style={[styles.panelTabText, activePanel === panel && styles.panelTabTextActive]}>
                 {panel === "routes"
                   ? "Routes"
-                  : panel === "planner"
-                    ? "Waypoints"
-                    : panel === "record"
-                      ? "Opname"
-                      : "Live"}
+                  : panel === "plan"
+                    ? "Dag"
+                    : panel === "planner"
+                      ? "Maken"
+                      : "Opname"}
               </Text>
             </Pressable>
-          ))}
-        </View>
+              ))}
+            </View>
 
-        <ScrollView
-          refreshControl={<RefreshControl refreshing={routesLoading} onRefresh={refreshRoutes} />}
-          showsVerticalScrollIndicator={false}
-        >
-          {activePanel === "routes" ? (
-            <>
-              <View style={styles.sectionHeader}>
-                <Text style={styles.sectionTitle}>Routes</Text>
-                {routesLoading ? <ActivityIndicator color="#f97316" /> : null}
-              </View>
+            <ScrollView
+              refreshControl={<RefreshControl refreshing={routesLoading} onRefresh={refreshRoutes} />}
+              showsVerticalScrollIndicator={false}
+              style={styles.sheetScroll}
+              contentContainerStyle={styles.sheetContent}
+            >
+              {activePanel === "routes" ? (
+                <>
+                  <View style={styles.sectionHeader}>
+                    <View>
+                      <Text style={styles.sectionTitle}>Routebibliotheek</Text>
+                      <Text style={styles.mutedText}>
+                        {filteredRoutes.length} van {routeCount} routes
+                      </Text>
+                    </View>
+                    {routesLoading ? <ActivityIndicator color="#f97316" /> : null}
+                  </View>
 
-              {routeError ? <Text style={styles.errorText}>{routeError}</Text> : null}
+                  {routeError ? <Text style={styles.errorText}>{routeError}</Text> : null}
 
-              {activeRoute ? (
-                <View style={styles.activeCard}>
-                  <Text style={styles.routeType}>{routeTypeLabel(activeRoute.routeType)}</Text>
-                  <Text style={styles.activeRouteName}>{activeRoute.name}</Text>
-                  <Text style={styles.routeMeta}>
-                    {activeRoute.group ?? activeRoute.country} | {formatKm(activeRoute.distanceKm)} km |{" "}
-                    {formatMeters(activeRoute.elevationGainM)} m stijgen
-                  </Text>
-                </View>
-              ) : null}
+                  <TextInput
+                    value={query}
+                    onChangeText={setQuery}
+                    placeholder="Zoek route"
+                    placeholderTextColor="#6b7280"
+                    style={styles.searchInput}
+                  />
 
-              {Object.entries(groupedRoutes).map(([group, groupRoutes]) => (
-                <View key={group} style={styles.routeGroup}>
-                  <Text style={styles.groupTitle}>{group}</Text>
-                  {groupRoutes.map((route) => {
-                    const selected = route.id === activeRoute?.id;
-                    return (
+                  <View style={styles.filterGrid}>
+                    {(["4x4", "roadtrip"] as RouteType[]).map((type) => {
+                      const selected = routeTypeFilter === type;
+                      return (
+                        <Pressable
+                          key={type}
+                          style={[styles.filterCard, selected && styles.filterCardActive]}
+                          onPress={() => setRouteTypeFilter((current) => (current === type ? "all" : type))}
+                        >
+                          <Text style={[styles.filterCardTitle, selected && styles.filterCardTitleActive]}>
+                            {routeTypeLabel(type)}
+                          </Text>
+                          <Text style={[styles.filterCardMeta, selected && styles.filterCardMetaActive]}>
+                            {routeTypeCounts[type]} routes
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+
+                  <View style={styles.segmentedRow}>
+                    {COUNTRIES.map((country) => {
+                      const selected = countryFilter === country;
+                      return (
+                        <Pressable
+                          key={country}
+                          style={[styles.segmentButton, selected && styles.segmentButtonActive]}
+                          onPress={() => setCountryFilter(country)}
+                        >
+                          <Text style={[styles.segmentButtonText, selected && styles.segmentButtonTextActive]}>
+                            {country === "all" ? "Alle landen" : country}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+
+                  <View style={styles.overviewCard}>
+                    <View style={styles.overviewHeader}>
+                      <View style={styles.routeTextBlock}>
+                        <Text style={styles.overviewTitle}>Overzicht op kaart</Text>
+                        <Text style={styles.routeSub}>
+                          {overviewRoutes.length} routes | {formatKm(overviewStats.routeDistanceKm)} km
+                          {overviewStats.connectionDistanceKm > 0
+                            ? ` | ${formatKm(overviewStats.connectionDistanceKm)} km verbinding`
+                            : ""}
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={styles.actionGrid}>
                       <Pressable
-                        key={route.id}
-                        style={[styles.routeRow, selected && styles.routeRowSelected]}
-                        onPress={() => {
-                          setActiveRouteId(route.id);
-                          setTargetWaypointIndex(0);
-                        }}
+                        style={[styles.secondaryButton, filteredRoutes.length === 0 && styles.disabledButton]}
+                        disabled={filteredRoutes.length === 0}
+                        onPress={selectVisibleRoutesForOverview}
                       >
-                        <View style={[styles.routeColor, { backgroundColor: route.color }]} />
+                        <Text style={styles.secondaryButtonText}>Toon alles</Text>
+                      </Pressable>
+                      <Pressable
+                        style={[styles.secondaryButton, overviewRoutes.length < 3 && styles.disabledButton]}
+                        disabled={overviewRoutes.length < 3}
+                        onPress={sortOverviewByNearest}
+                      >
+                        <Text style={styles.secondaryButtonText}>Sorteer</Text>
+                      </Pressable>
+                      <Pressable
+                        style={[styles.primaryButton, overviewRoutes.length === 0 && styles.disabledButton]}
+                        disabled={overviewRoutes.length === 0}
+                        onPress={addOverviewToPlan}
+                      >
+                        <Text style={styles.primaryButtonText}>Naar dag</Text>
+                      </Pressable>
+                      <Pressable
+                        style={[styles.secondaryButton, overviewRoutes.length === 0 && styles.disabledButton]}
+                        disabled={overviewRoutes.length === 0}
+                        onPress={() => setOverviewRouteIds([])}
+                      >
+                        <Text style={styles.secondaryButtonText}>Wis</Text>
+                      </Pressable>
+                    </View>
+                    {overviewConnections.length > 0 ? (
+                      <View style={styles.connectionList}>
+                        {overviewConnections.map((connection, index) => (
+                          <Text key={connection.id} style={styles.routeSub}>
+                            {index + 1}. {formatKm(connection.distanceKm)} km naar volgende route
+                          </Text>
+                        ))}
+                      </View>
+                    ) : null}
+                  </View>
+
+                  {activeRoute ? (
+                    <>
+                      <Pressable
+                        style={styles.activeRouteSummary}
+                        onPress={() => setActiveRouteDetailsOpen((current) => !current)}
+                      >
+                        <View style={[styles.routeColor, { backgroundColor: activeRoute.color }]} />
                         <View style={styles.routeTextBlock}>
                           <Text style={styles.routeName} numberOfLines={1}>
-                            {route.name}
+                            {activeRoute.name}
                           </Text>
                           <Text style={styles.routeSub}>
-                            {routeTypeLabel(route.routeType)} | {formatKm(route.distanceKm)} km
+                            {routeTypeLabel(activeRoute.routeType)} | {formatKm(activeRoute.distanceKm)} km | details
                           </Text>
                         </View>
+                        <Text style={styles.routeActionText}>{activeRouteDetailsOpen ? "-" : "+"}</Text>
                       </Pressable>
+                      {activeRouteDetailsOpen ? (
+                        <View style={styles.activeCard}>
+                          <Text style={styles.routeType}>{routeTypeLabel(activeRoute.routeType)}</Text>
+                          <Text style={styles.activeRouteName}>{activeRoute.name}</Text>
+                          <Text style={styles.routeMeta}>
+                            {normalizeRegionName(activeRoute.group, activeRoute.country)} | {formatKm(activeRoute.distanceKm)} km |{" "}
+                            {formatMeters(activeRoute.elevationGainM)} m stijgen
+                          </Text>
+                        </View>
+                      ) : null}
+                    </>
+                  ) : null}
+
+                  {sortedRouteGroups.map(([group, groupRoutes]) => {
+                    const expanded = expandedRouteGroups[group] ?? group === activeRouteGroup;
+
+                    return (
+                      <View key={group} style={styles.routeGroup}>
+                        <Pressable style={styles.groupHeader} onPress={() => toggleRouteGroup(group)}>
+                          <Text style={styles.groupTitle}>{group}</Text>
+                          <Text style={styles.groupMeta}>
+                            {groupRoutes.length} routes {expanded ? "-" : "+"}
+                          </Text>
+                        </Pressable>
+                        {expanded
+                          ? groupRoutes.map((route) => {
+                              const selected = route.id === activeRoute?.id;
+                              const inOverview = isRouteInOverview(route.id);
+
+                              return (
+                                <View key={route.id} style={styles.routeRowShell}>
+                                  <Pressable
+                                    style={[styles.routeRow, selected && styles.routeRowSelected]}
+                                    onPress={() => selectRoute(route)}
+                                  >
+                                    <View style={[styles.routeColor, { backgroundColor: route.color }]} />
+                                    <View style={styles.routeTextBlock}>
+                                      <Text style={styles.routeName} numberOfLines={1}>
+                                        {route.name}
+                                      </Text>
+                                      <Text style={styles.routeSub}>
+                                        {route.country} | {formatKm(route.distanceKm)} km
+                                      </Text>
+                                    </View>
+                                  </Pressable>
+                                  <Pressable
+                                    style={[styles.iconAction, inOverview && styles.iconActionActive]}
+                                    onPress={() => toggleRouteInOverview(route)}
+                                  >
+                                    <Text style={[styles.iconActionText, inOverview && styles.iconActionTextActive]}>
+                                      {inOverview ? "Aan" : "Kaart"}
+                                    </Text>
+                                  </Pressable>
+                                  <Pressable style={styles.iconAction} onPress={() => addRouteToPlan(route)}>
+                                    <Text style={styles.iconActionText}>+</Text>
+                                  </Pressable>
+                                </View>
+                              );
+                            })
+                          : null}
+                      </View>
                     );
                   })}
-                </View>
-              ))}
-            </>
-          ) : null}
+                </>
+              ) : null}
+
+              {activePanel === "plan" ? (
+                <>
+                  <View style={styles.sectionHeader}>
+                    <View>
+                      <Text style={styles.sectionTitle}>Dagschema</Text>
+                      <Text style={styles.mutedText}>
+                        {dayPlanItems.length} etappes | {formatKm(planStats.distanceKm)} km |{" "}
+                        {formatDuration(planStats.totalMinutes)}
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.planSummaryGrid}>
+                    <View style={styles.statTile}>
+                      <Text style={styles.statLabel}>Afstand</Text>
+                      <Text style={styles.statValue}>{formatKm(planStats.distanceKm)} km</Text>
+                    </View>
+                    <View style={styles.statTile}>
+                      <Text style={styles.statLabel}>Stijgen</Text>
+                      <Text style={styles.statValue}>{formatMeters(planStats.elevationGainM)} m</Text>
+                    </View>
+                    <View style={styles.statTile}>
+                      <Text style={styles.statLabel}>Tijd</Text>
+                      <Text style={styles.statValue}>{formatDuration(planStats.totalMinutes)}</Text>
+                    </View>
+                  </View>
+
+                  {activeRoute ? (
+                    <Pressable style={styles.primaryButton} onPress={() => addRouteToPlan(activeRoute)}>
+                      <Text style={styles.primaryButtonText}>Actieve route toevoegen</Text>
+                    </Pressable>
+                  ) : null}
+
+                  <View style={styles.mapPointPanel}>
+                    <View style={styles.sectionHeader}>
+                      <View>
+                        <Text style={styles.sectionTitle}>Kaartpunten</Text>
+                        <Text style={styles.mutedText}>{mapPoints.length} punten</Text>
+                      </View>
+                    </View>
+                    <View style={styles.pointTypeGrid}>
+                      {MAP_POINT_TYPES.map((type) => {
+                        const selected = pointType === type;
+                        return (
+                          <Pressable
+                            key={type}
+                            style={[styles.pointTypeButton, selected && styles.pointTypeButtonActive]}
+                            onPress={() => {
+                              setPointType(type);
+                              if (!pointName.trim() || pointName === mapPointLabel(pointType)) {
+                                setPointName(mapPointLabel(type));
+                              }
+                            }}
+                          >
+                            <Text style={[styles.pointTypeText, selected && styles.pointTypeTextActive]}>
+                              {mapPointLabel(type)}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                    <TextInput
+                      value={pointName}
+                      onChangeText={setPointName}
+                      placeholder="Naam punt"
+                      placeholderTextColor="#6b7280"
+                      style={styles.input}
+                    />
+                    <View style={styles.coordinateRow}>
+                      <TextInput
+                        value={pointCoordinates}
+                        onChangeText={(text) => {
+                          setPointCoordinates(text);
+                          setPointError(null);
+                        }}
+                        placeholder="52.196562, -3.749340"
+                        placeholderTextColor="#6b7280"
+                        style={[styles.input, styles.coordinateInput]}
+                      />
+                      <Pressable style={styles.iconAction} onPress={addPointFromCoordinates}>
+                        <Text style={styles.iconActionText}>+</Text>
+                      </Pressable>
+                    </View>
+                    <TextInput
+                      value={pointNote}
+                      onChangeText={setPointNote}
+                      placeholder="Notitie"
+                      placeholderTextColor="#6b7280"
+                      style={styles.input}
+                    />
+                    <View style={styles.actionGrid}>
+                      <Pressable
+                        style={[styles.secondaryButton, mapPickMode && styles.compactButtonActive]}
+                        onPress={toggleMapPickMode}
+                      >
+                        <Text style={styles.secondaryButtonText}>{mapPickMode ? "Kaart actief" : "Plaats via kaart"}</Text>
+                      </Pressable>
+                      <Pressable style={[styles.secondaryButton, !ownLocation && styles.disabledButton]} onPress={addPointAtOwnLocation}>
+                        <Text style={styles.secondaryButtonText}>Mijn GPS</Text>
+                      </Pressable>
+                      <Pressable style={[styles.secondaryButton, !activeRoute && styles.disabledButton]} onPress={addPointAtRouteEnd}>
+                        <Text style={styles.secondaryButtonText}>Route-einde</Text>
+                      </Pressable>
+                    </View>
+                    <View style={styles.actionGrid}>
+                      <Pressable style={[styles.secondaryButton, !ownLocation && styles.disabledButton]} onPress={fillCoordinatesFromOwnLocation}>
+                        <Text style={styles.secondaryButtonText}>Vul GPS</Text>
+                      </Pressable>
+                      <Pressable style={[styles.secondaryButton, !activeRoute && styles.disabledButton]} onPress={fillCoordinatesFromRouteEnd}>
+                        <Text style={styles.secondaryButtonText}>Vul einde</Text>
+                      </Pressable>
+                    </View>
+                    {pointError ? <Text style={styles.errorText}>{pointError}</Text> : null}
+                    {mapPoints.map((point, index) => (
+                      <View key={point.id} style={styles.pointRow}>
+                        <View style={[styles.pointNumber, { backgroundColor: mapPointColor(point.type) }]}>
+                          <Text style={styles.pointNumberText}>{mapPointSymbol(point.type)}</Text>
+                        </View>
+                        <View style={styles.routeTextBlock}>
+                          <Text style={styles.routeName}>
+                            {index + 1}. {point.name}
+                          </Text>
+                          <Text style={styles.routeSub}>{point.note ?? formatCoordinate(point.lat, point.lng)}</Text>
+                        </View>
+                        <Pressable style={styles.iconAction} onPress={() => removeMapPoint(point.id)}>
+                          <Text style={styles.iconActionText}>x</Text>
+                        </Pressable>
+                      </View>
+                    ))}
+                  </View>
+
+                  {dayPlanItems.length === 0 ? (
+                    <Text style={styles.emptyText}>Voeg routes toe met de plusknop in Routes of vanuit het overzicht.</Text>
+                  ) : (
+                    <View style={styles.routeGroup}>
+                      {dayPlanItems.map((item, index) => {
+                        const route = routeMap.get(item.routeId);
+                        if (!route) return null;
+
+                        return (
+                          <View key={item.id} style={[styles.planItem, route.id === activeRoute?.id && styles.routeRowSelected]}>
+                            <Pressable style={styles.planItemMain} onPress={() => selectRoute(route)}>
+                              <View style={styles.pointNumber}>
+                                <Text style={styles.pointNumberText}>{index + 1}</Text>
+                              </View>
+                              <View style={styles.routeTextBlock}>
+                                <Text style={styles.routeName} numberOfLines={1}>
+                                  {route.name}
+                                </Text>
+                                <Text style={styles.routeSub}>
+                                  {formatKm(route.distanceKm)} km | {formatDuration(estimateRouteMinutes(route))}
+                                </Text>
+                              </View>
+                            </Pressable>
+                            <View style={styles.planControls}>
+                              <Pressable style={styles.iconAction} disabled={index === 0} onPress={() => movePlanItem(item.id, -1)}>
+                                <Text style={styles.iconActionText}>Up</Text>
+                              </Pressable>
+                              <Pressable
+                                style={styles.iconAction}
+                                disabled={index === dayPlanItems.length - 1}
+                                onPress={() => movePlanItem(item.id, 1)}
+                              >
+                                <Text style={styles.iconActionText}>Down</Text>
+                              </Pressable>
+                              <Pressable style={styles.iconAction} onPress={() => removePlanItem(item.id)}>
+                                <Text style={styles.iconActionText}>x</Text>
+                              </Pressable>
+                            </View>
+                            <View style={styles.planFields}>
+                              <TextInput
+                                value={item.startTime}
+                                onChangeText={(text) => updatePlanItem(item.id, { startTime: text })}
+                                placeholder="09:00"
+                                style={[styles.input, styles.planFieldInput]}
+                              />
+                              <TextInput
+                                value={String(item.breakMinutes)}
+                                onChangeText={(text) =>
+                                  updatePlanItem(item.id, {
+                                    breakMinutes: Math.max(0, Number.parseInt(text || "0", 10))
+                                  })
+                                }
+                                keyboardType="numeric"
+                                placeholder="Pauze"
+                                style={[styles.input, styles.planFieldInput]}
+                              />
+                            </View>
+                            <TextInput
+                              value={item.note}
+                              onChangeText={(text) => updatePlanItem(item.id, { note: text })}
+                              placeholder="Notitie"
+                              placeholderTextColor="#6b7280"
+                              style={styles.input}
+                            />
+                          </View>
+                        );
+                      })}
+                    </View>
+                  )}
+                </>
+              ) : null}
 
           {activePanel === "planner" ? (
             <>
@@ -1267,57 +2361,9 @@ export default function App() {
             </>
           ) : null}
 
-          {activePanel === "live" ? (
-            <View style={styles.loginPanel}>
-              <Text style={styles.sectionTitle}>Live groep</Text>
-              {session?.user ? (
-                <>
-                  <Text style={styles.mutedText}>Ingelogd als {session.user.email ?? "rijder"}</Text>
-                  <TextInput
-                    value={displayName}
-                    onChangeText={setDisplayName}
-                    placeholder="Naam op de kaart"
-                    placeholderTextColor="#6b7280"
-                    style={styles.input}
-                  />
-                  <Pressable style={styles.secondaryButton} onPress={handleSignOut}>
-                    <Text style={styles.secondaryButtonText}>Uitloggen</Text>
-                  </Pressable>
-                </>
-              ) : (
-                <>
-                  <Text style={styles.mutedText}>Login is nodig om je live locatie met anderen te delen.</Text>
-                  <TextInput
-                    value={email}
-                    onChangeText={setEmail}
-                    autoCapitalize="none"
-                    keyboardType="email-address"
-                    placeholder="email@example.com"
-                    placeholderTextColor="#6b7280"
-                    style={styles.input}
-                  />
-                  <Pressable
-                    style={[styles.primaryButton, (!isSupabaseConfigured || !email.trim()) && styles.disabledButton]}
-                    disabled={!isSupabaseConfigured || !email.trim()}
-                    onPress={handleMagicLink}
-                  >
-                    <Text style={styles.primaryButtonText}>Stuur magic link</Text>
-                  </Pressable>
-                </>
-              )}
-              {authMessage ? <Text style={styles.mutedText}>{authMessage}</Text> : null}
-              {visibleRemoteRiders.length > 0 ? (
-                <View style={styles.riderList}>
-                  {visibleRemoteRiders.map((rider) => (
-                    <Text key={rider.userId} style={styles.mutedText}>
-                      {rider.name} | {gpsQualityLabel(rider.gpsQuality ?? "searching", rider.accuracyM)}
-                    </Text>
-                  ))}
-                </View>
-              ) : null}
-            </View>
-          ) : null}
-        </ScrollView>
+            </ScrollView>
+          </>
+        ) : null}
       </View>
     </View>
   );
@@ -1344,19 +2390,44 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12
   },
+  topInfo: {
+    flex: 1,
+    paddingRight: 10
+  },
   appName: {
     color: "#f8fafc",
-    fontSize: 22,
+    fontSize: 20,
     fontWeight: "800"
   },
   statusText: {
     color: "#cbd5e1",
+    fontSize: 12,
     marginTop: 2
   },
   topActions: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8
+  },
+  liveButton: {
+    minWidth: 58,
+    height: 44,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: "rgba(248, 250, 252, 0.28)"
+  },
+  liveButtonActive: {
+    borderColor: "#14b8a6",
+    backgroundColor: "#14b8a6"
+  },
+  liveButtonText: {
+    color: "#f8fafc",
+    fontWeight: "800"
+  },
+  liveButtonTextActive: {
+    color: "#042f2e"
   },
   planButton: {
     minWidth: 58,
@@ -1399,11 +2470,11 @@ const styles = StyleSheet.create({
     color: "#fff"
   },
   locationButton: {
-    width: 48,
-    height: 48,
+    width: 44,
+    height: 44,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: 24,
+    borderRadius: 22,
     backgroundColor: "#f97316"
   },
   locationButtonText: {
@@ -1412,9 +2483,9 @@ const styles = StyleSheet.create({
   },
   gpsBadge: {
     position: "absolute",
-    top: 126,
+    top: 118,
     left: 16,
-    right: 16,
+    right: 110,
     borderRadius: 14,
     backgroundColor: "rgba(255, 255, 255, 0.95)",
     paddingHorizontal: 14,
@@ -1428,18 +2499,162 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 2
   },
+  mapModeBadge: {
+    position: "absolute",
+    top: 118,
+    left: 16,
+    right: 16,
+    minHeight: 44,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    borderRadius: 14,
+    backgroundColor: "rgba(17, 24, 39, 0.92)",
+    paddingHorizontal: 14,
+    paddingVertical: 8
+  },
+  mapModeText: {
+    flex: 1,
+    color: "#f8fafc",
+    fontWeight: "800"
+  },
+  mapModeCancel: {
+    minHeight: 32,
+    justifyContent: "center",
+    borderRadius: 999,
+    backgroundColor: "#f8fafc",
+    paddingHorizontal: 12
+  },
+  mapModeCancelText: {
+    color: "#111827",
+    fontWeight: "800"
+  },
+  zoomControls: {
+    position: "absolute",
+    right: 16,
+    top: 118,
+    gap: 8
+  },
+  zoomButton: {
+    width: 44,
+    height: 44,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 22,
+    backgroundColor: "rgba(255, 255, 255, 0.96)"
+  },
+  zoomButtonText: {
+    color: "#111827",
+    fontSize: 24,
+    fontWeight: "800"
+  },
+  liveOverlay: {
+    position: "absolute",
+    top: 112,
+    left: 16,
+    right: 16,
+    gap: 10,
+    borderRadius: 16,
+    backgroundColor: "rgba(248, 250, 252, 0.98)",
+    padding: 14
+  },
+  liveOverlayHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between"
+  },
+  liveOverlayTitle: {
+    color: "#0f172a",
+    fontSize: 17,
+    fontWeight: "800"
+  },
+  closeButton: {
+    width: 34,
+    height: 34,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 17,
+    backgroundColor: "#e2e8f0"
+  },
+  closeButtonText: {
+    color: "#111827",
+    fontWeight: "800"
+  },
   sheet: {
     position: "absolute",
     left: 0,
     right: 0,
     bottom: 0,
-    maxHeight: "52%",
     borderTopLeftRadius: 22,
     borderTopRightRadius: 22,
     backgroundColor: "#f8fafc",
     paddingHorizontal: 16,
-    paddingTop: 14,
+    paddingTop: 10,
     paddingBottom: 28
+  },
+  sheetCompact: {
+    height: 96
+  },
+  sheetHalf: {
+    height: "46%"
+  },
+  sheetExpanded: {
+    height: "84%"
+  },
+  sheetHeader: {
+    minHeight: 58,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10
+  },
+  sheetHandle: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    minHeight: 52
+  },
+  sheetGrip: {
+    width: 36,
+    height: 5,
+    borderRadius: 999,
+    backgroundColor: "#94a3b8"
+  },
+  sheetSummary: {
+    flex: 1
+  },
+  sheetSummaryTitle: {
+    color: "#0f172a",
+    fontWeight: "800"
+  },
+  sheetSummaryDetail: {
+    color: "#64748b",
+    fontSize: 12,
+    marginTop: 2
+  },
+  sheetActions: {
+    flexDirection: "row",
+    gap: 8
+  },
+  sheetActionButton: {
+    minHeight: 36,
+    justifyContent: "center",
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "#cbd5e1",
+    paddingHorizontal: 12
+  },
+  sheetActionText: {
+    color: "#0f172a",
+    fontWeight: "800"
+  },
+  sheetScroll: {
+    flex: 1
+  },
+  sheetContent: {
+    paddingBottom: 22
   },
   panelTabs: {
     flexDirection: "row",
@@ -1489,6 +2704,112 @@ const styles = StyleSheet.create({
   errorText: {
     marginTop: 8,
     color: "#b91c1c"
+  },
+  searchInput: {
+    minHeight: 44,
+    marginTop: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#cbd5e1",
+    backgroundColor: "#fff",
+    color: "#0f172a",
+    paddingHorizontal: 12
+  },
+  filterGrid: {
+    flexDirection: "row",
+    gap: 8,
+    marginTop: 12
+  },
+  filterCard: {
+    flex: 1,
+    minHeight: 58,
+    justifyContent: "center",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#cbd5e1",
+    backgroundColor: "#fff",
+    paddingHorizontal: 12
+  },
+  filterCardActive: {
+    borderColor: "#0f766e",
+    backgroundColor: "#ccfbf1"
+  },
+  filterCardTitle: {
+    color: "#0f172a",
+    fontWeight: "800"
+  },
+  filterCardTitleActive: {
+    color: "#0f766e"
+  },
+  filterCardMeta: {
+    color: "#64748b",
+    fontSize: 12,
+    marginTop: 2
+  },
+  filterCardMetaActive: {
+    color: "#0f766e"
+  },
+  segmentedRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginTop: 10
+  },
+  segmentButton: {
+    flex: 1,
+    minHeight: 38,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "#cbd5e1",
+    backgroundColor: "#fff",
+    paddingHorizontal: 8
+  },
+  segmentButtonActive: {
+    borderColor: "#111827",
+    backgroundColor: "#111827"
+  },
+  segmentButtonText: {
+    color: "#334155",
+    fontSize: 12,
+    fontWeight: "800"
+  },
+  segmentButtonTextActive: {
+    color: "#f8fafc"
+  },
+  overviewCard: {
+    gap: 8,
+    marginTop: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    backgroundColor: "#fff",
+    padding: 12
+  },
+  overviewHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between"
+  },
+  overviewTitle: {
+    color: "#0f172a",
+    fontWeight: "800"
+  },
+  connectionList: {
+    gap: 4,
+    marginTop: 4
+  },
+  activeRouteSummary: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginTop: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#f97316",
+    backgroundColor: "#fff7ed",
+    paddingHorizontal: 12,
+    paddingVertical: 10
   },
   activeCard: {
     marginTop: 12,
@@ -1551,10 +2872,31 @@ const styles = StyleSheet.create({
     color: "#334155",
     fontSize: 13,
     fontWeight: "800",
-    marginBottom: 8,
     textTransform: "uppercase"
   },
+  groupHeader: {
+    minHeight: 42,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    borderRadius: 12,
+    backgroundColor: "#e2e8f0",
+    paddingHorizontal: 12,
+    marginBottom: 8
+  },
+  groupMeta: {
+    color: "#475569",
+    fontSize: 12,
+    fontWeight: "800"
+  },
+  routeRowShell: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 8
+  },
   routeRow: {
+    flex: 1,
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
@@ -1563,8 +2905,7 @@ const styles = StyleSheet.create({
     borderColor: "#e2e8f0",
     backgroundColor: "#fff",
     paddingHorizontal: 12,
-    paddingVertical: 10,
-    marginBottom: 8
+    paddingVertical: 10
   },
   routeRowSelected: {
     borderColor: "#f97316",
@@ -1585,6 +2926,33 @@ const styles = StyleSheet.create({
   routeSub: {
     color: "#64748b",
     marginTop: 2
+  },
+  routeActionText: {
+    color: "#0f172a",
+    fontSize: 18,
+    fontWeight: "800"
+  },
+  iconAction: {
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#cbd5e1",
+    backgroundColor: "#fff",
+    paddingHorizontal: 10
+  },
+  iconActionActive: {
+    borderColor: "#0f766e",
+    backgroundColor: "#ccfbf1"
+  },
+  iconActionText: {
+    color: "#0f172a",
+    fontWeight: "800"
+  },
+  iconActionTextActive: {
+    color: "#0f766e"
   },
   compactButton: {
     minWidth: 56,
@@ -1630,6 +2998,100 @@ const styles = StyleSheet.create({
   pointNumberText: {
     color: "#fff",
     fontWeight: "800"
+  },
+  planSummaryGrid: {
+    flexDirection: "row",
+    gap: 8,
+    marginTop: 12,
+    marginBottom: 12
+  },
+  statTile: {
+    flex: 1,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    backgroundColor: "#fff",
+    padding: 10
+  },
+  statLabel: {
+    color: "#64748b",
+    fontSize: 12,
+    fontWeight: "700"
+  },
+  statValue: {
+    color: "#0f172a",
+    fontWeight: "800",
+    marginTop: 4
+  },
+  mapPointPanel: {
+    gap: 10,
+    marginTop: 14,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    backgroundColor: "#fff",
+    padding: 12
+  },
+  pointTypeGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8
+  },
+  pointTypeButton: {
+    minHeight: 38,
+    width: "31%",
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#cbd5e1",
+    backgroundColor: "#fff",
+    paddingHorizontal: 6
+  },
+  pointTypeButtonActive: {
+    borderColor: "#7c3aed",
+    backgroundColor: "#ede9fe"
+  },
+  pointTypeText: {
+    color: "#334155",
+    fontSize: 12,
+    fontWeight: "800"
+  },
+  pointTypeTextActive: {
+    color: "#5b21b6"
+  },
+  coordinateRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8
+  },
+  coordinateInput: {
+    flex: 1
+  },
+  planItem: {
+    gap: 8,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    backgroundColor: "#fff",
+    padding: 12,
+    marginBottom: 10
+  },
+  planItemMain: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10
+  },
+  planControls: {
+    flexDirection: "row",
+    gap: 8
+  },
+  planFields: {
+    flexDirection: "row",
+    gap: 8
+  },
+  planFieldInput: {
+    flex: 1
   },
   emptyText: {
     marginTop: 14,
@@ -1777,6 +3239,33 @@ const styles = StyleSheet.create({
   },
   plannerMarkerText: {
     color: "#fff",
+    fontWeight: "800"
+  },
+  mapPointMarker: {
+    width: 36,
+    height: 36,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 18,
+    borderWidth: 2,
+    borderColor: "#fff"
+  },
+  mapPointMarkerText: {
+    color: "#fff",
+    fontWeight: "800"
+  },
+  mapPointIndex: {
+    position: "absolute",
+    right: -5,
+    bottom: -5,
+    minWidth: 18,
+    height: 18,
+    overflow: "hidden",
+    textAlign: "center",
+    borderRadius: 9,
+    backgroundColor: "#111827",
+    color: "#fff",
+    fontSize: 10,
     fontWeight: "800"
   }
 });

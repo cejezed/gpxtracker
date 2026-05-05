@@ -2,6 +2,8 @@ export type RouteCountry = "Engeland" | "Duitsland" | "Onbekend";
 
 export type RouteType = "4x4" | "roadtrip";
 
+export type MapPointType = "overnight" | "fuel" | "food" | "viewpoint" | "repair" | "note";
+
 export type RoutePoint = {
   lat: number;
   lng: number;
@@ -42,4 +44,14 @@ export type RiderLocation = {
   color: string;
   isSelf?: boolean;
   gpsQuality?: GpsQuality;
+};
+
+export type MapPoint = {
+  id: string;
+  name: string;
+  type: MapPointType;
+  lat: number;
+  lng: number;
+  note?: string;
+  source: "manual" | "own-location" | "route-end";
 };
