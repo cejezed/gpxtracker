@@ -12,6 +12,7 @@ import {
   type ViewStateChangeEvent
 } from "@maplibre/maplibre-react-native";
 import type { RealtimeChannel, Session } from "@supabase/supabase-js";
+import * as DocumentPicker from "expo-document-picker";
 import * as Linking from "expo-linking";
 import * as Location from "expo-location";
 import { StatusBar } from "expo-status-bar";
@@ -30,6 +31,7 @@ import {
 } from "react-native";
 
 import { formatKm, formatMeters, loadPublicRoutes } from "./src/routes";
+import { parseGpxRoute } from "./src/gpx";
 import { buildRoadRoute } from "./src/routing";
 import { isSupabaseConfigured, supabase } from "./src/supabase";
 import type {
@@ -535,6 +537,7 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [activeRouteId, setActiveRouteId] = useState<string | null>(null);
   const [routesLoading, setRoutesLoading] = useState(false);
+  const [gpxImporting, setGpxImporting] = useState(false);
   const [routeError, setRouteError] = useState<string | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [email, setEmail] = useState("");
@@ -1353,6 +1356,44 @@ export default function App() {
     }
   }
 
+  async function importGpxFile() {
+    setRouteError(null);
+    setGpxImporting(true);
+
+    try {
+      const picked = await DocumentPicker.getDocumentAsync({
+        copyToCacheDirectory: true,
+        multiple: false,
+        type: ["application/gpx+xml", "application/xml", "text/xml", "application/octet-stream", "*/*"]
+      });
+
+      if (picked.canceled) return;
+
+      const asset = picked.assets[0];
+      if (!asset?.uri) throw new Error("Geen GPX-bestand gekozen.");
+
+      const response = await fetch(asset.uri);
+      const text = await response.text();
+      const draftRoute = parseGpxRoute(text, asset.name || "route.gpx", {
+        colorIndex: routes.length,
+        group: "Eigen offroad routes",
+        country: "Onbekend",
+        routeType: "4x4"
+      });
+      const route = await saveRoute(draftRoute);
+
+      setRoutes((current) => [route, ...current]);
+      setOverviewRouteIds((current) => (current.includes(route.id) ? current : [route.id, ...current]));
+      selectRoute(route);
+      setExpandedRouteGroups((current) => ({ ...current, [routeGroupLabel(route)]: true }));
+      setSheetMode("half");
+    } catch (error) {
+      setRouteError(error instanceof Error ? error.message : "GPX import is mislukt.");
+    } finally {
+      setGpxImporting(false);
+    }
+  }
+
   function startRecording() {
     setRecordingActive(true);
     setRecordingStartedAt((current) => current ?? new Date().toISOString());
@@ -1602,6 +1643,34 @@ export default function App() {
         </View>
         <View style={styles.topActions}>
           <Pressable
+            style={[styles.recordButton, recordingActive && styles.recordButtonActive]}
+            onPress={() => {
+              if (recordingActive) {
+                pauseRecording();
+              } else {
+                startRecording();
+                setSheetMode("half");
+              }
+            }}
+          >
+            <Text style={[styles.recordButtonText, recordingActive && styles.recordButtonTextActive]}>
+              {recordingActive ? "Stop" : "Rec"}
+            </Text>
+          </Pressable>
+          <Pressable
+            style={[styles.planButton, plannerEnabled && styles.planButtonActive]}
+            onPress={() => {
+              const nextEnabled = !plannerEnabled;
+              setPlannerEnabled(nextEnabled);
+              setMapPickMode(false);
+              setLivePanelOpen(false);
+              setActivePanel("planner");
+              setSheetMode(nextEnabled ? "compact" : "half");
+            }}
+          >
+            <Text style={[styles.planButtonText, plannerEnabled && styles.planButtonTextActive]}>Plan</Text>
+          </Pressable>
+          <Pressable
             style={[styles.liveButton, livePanelOpen && styles.liveButtonActive]}
             onPress={() => {
               setLivePanelOpen((current) => !current);
@@ -1773,7 +1842,16 @@ export default function App() {
                         {filteredRoutes.length} van {routeCount} routes
                       </Text>
                     </View>
-                    {routesLoading ? <ActivityIndicator color="#f97316" /> : null}
+                    <View style={styles.headerActions}>
+                      {routesLoading || gpxImporting ? <ActivityIndicator color="#f97316" /> : null}
+                      <Pressable
+                        style={[styles.compactButton, gpxImporting && styles.disabledButton]}
+                        disabled={gpxImporting}
+                        onPress={importGpxFile}
+                      >
+                        <Text style={styles.compactButtonText}>{gpxImporting ? "..." : "GPX"}</Text>
+                      </Pressable>
+                    </View>
                   </View>
 
                   {routeError ? <Text style={styles.errorText}>{routeError}</Text> : null}
@@ -2379,44 +2457,49 @@ const styles = StyleSheet.create({
   },
   topBar: {
     position: "absolute",
-    top: 48,
-    left: 16,
-    right: 16,
+    top: 46,
+    left: 12,
+    right: 12,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    borderRadius: 16,
-    backgroundColor: "rgba(15, 23, 42, 0.92)",
-    paddingHorizontal: 16,
-    paddingVertical: 12
+    gap: 8
   },
   topInfo: {
     flex: 1,
-    paddingRight: 10
+    minHeight: 42,
+    justifyContent: "center",
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(248, 250, 252, 0.16)",
+    backgroundColor: "rgba(15, 23, 42, 0.58)",
+    paddingHorizontal: 12,
+    paddingVertical: 6
   },
   appName: {
     color: "#f8fafc",
-    fontSize: 20,
+    fontSize: 14,
     fontWeight: "800"
   },
   statusText: {
     color: "#cbd5e1",
-    fontSize: 12,
+    fontSize: 10,
     marginTop: 2
   },
   topActions: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8
+    gap: 6
   },
   liveButton: {
-    minWidth: 58,
-    height: 44,
+    width: 40,
+    height: 40,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: 22,
+    borderRadius: 20,
     borderWidth: 1,
-    borderColor: "rgba(248, 250, 252, 0.28)"
+    borderColor: "rgba(248, 250, 252, 0.18)",
+    backgroundColor: "rgba(15, 23, 42, 0.48)"
   },
   liveButtonActive: {
     borderColor: "#14b8a6",
@@ -2424,19 +2507,21 @@ const styles = StyleSheet.create({
   },
   liveButtonText: {
     color: "#f8fafc",
+    fontSize: 10,
     fontWeight: "800"
   },
   liveButtonTextActive: {
     color: "#042f2e"
   },
   planButton: {
-    minWidth: 58,
-    height: 48,
+    width: 40,
+    height: 40,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: 24,
+    borderRadius: 20,
     borderWidth: 1,
-    borderColor: "rgba(248, 250, 252, 0.28)"
+    borderColor: "rgba(248, 250, 252, 0.18)",
+    backgroundColor: "rgba(15, 23, 42, 0.48)"
   },
   planButtonActive: {
     borderColor: "#14b8a6",
@@ -2444,19 +2529,21 @@ const styles = StyleSheet.create({
   },
   planButtonText: {
     color: "#f8fafc",
+    fontSize: 10,
     fontWeight: "800"
   },
   planButtonTextActive: {
     color: "#042f2e"
   },
   recordButton: {
-    minWidth: 54,
-    height: 48,
+    width: 40,
+    height: 40,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: 24,
+    borderRadius: 20,
     borderWidth: 1,
-    borderColor: "rgba(248, 250, 252, 0.28)"
+    borderColor: "rgba(248, 250, 252, 0.18)",
+    backgroundColor: "rgba(15, 23, 42, 0.48)"
   },
   recordButtonActive: {
     borderColor: "#ef4444",
@@ -2464,26 +2551,30 @@ const styles = StyleSheet.create({
   },
   recordButtonText: {
     color: "#f8fafc",
+    fontSize: 10,
     fontWeight: "800"
   },
   recordButtonTextActive: {
     color: "#fff"
   },
   locationButton: {
-    width: 44,
-    height: 44,
+    width: 40,
+    height: 40,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: 22,
-    backgroundColor: "#f97316"
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: "rgba(248, 250, 252, 0.18)",
+    backgroundColor: "rgba(249, 115, 22, 0.82)"
   },
   locationButtonText: {
     color: "#111827",
+    fontSize: 10,
     fontWeight: "800"
   },
   gpsBadge: {
     position: "absolute",
-    top: 118,
+    top: 102,
     left: 16,
     right: 110,
     borderRadius: 14,
@@ -2501,7 +2592,7 @@ const styles = StyleSheet.create({
   },
   mapModeBadge: {
     position: "absolute",
-    top: 118,
+    top: 102,
     left: 16,
     right: 16,
     minHeight: 44,
@@ -2533,7 +2624,7 @@ const styles = StyleSheet.create({
   zoomControls: {
     position: "absolute",
     right: 16,
-    top: 118,
+    top: 102,
     gap: 8
   },
   zoomButton: {
@@ -2551,7 +2642,7 @@ const styles = StyleSheet.create({
   },
   liveOverlay: {
     position: "absolute",
-    top: 112,
+    top: 102,
     left: 16,
     right: 16,
     gap: 10,
@@ -2686,6 +2777,11 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between"
+  },
+  headerActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8
   },
   sectionTitle: {
     color: "#0f172a",
