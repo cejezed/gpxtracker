@@ -74,6 +74,17 @@ If the rider is logged in, the recorded route is saved to Supabase. Without logi
 Install and log in to EAS CLI, then run from `apps/mobile`:
 
 ```bash
+npx eas-cli@latest login
+npx eas-cli@latest env:create --environment production --name EXPO_PUBLIC_SUPABASE_URL --value https://your-project.supabase.co --visibility plaintext --force
+npx eas-cli@latest env:create --environment production --name EXPO_PUBLIC_SUPABASE_ANON_KEY --value your-anon-key --visibility plaintext --force
+npx eas-cli@latest env:create --environment production --name EXPO_PUBLIC_OSRM_BASE_URL --value https://router.project-osrm.org --visibility plaintext --force
+```
+
+Only add public `EXPO_PUBLIC_` values to EAS. Do not add the Supabase service-role key to the mobile app or EAS.
+
+For an internal APK test:
+
+```bash
 npx eas build --platform android --profile preview
 ```
 
