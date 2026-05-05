@@ -23,6 +23,7 @@ import {
   Pressable,
   RefreshControl,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   TextInput,
@@ -93,6 +94,12 @@ type PlannerPoint = RoutePoint & {
 
 type ActivePanel = "routes" | "plan" | "planner" | "record";
 type SheetMode = "compact" | "half" | "expanded";
+
+type ActiveTrip = {
+  id: string;
+  name: string;
+  shareCode: string;
+};
 
 type DayPlanItem = {
   id: string;
@@ -308,6 +315,45 @@ function routeDistanceKm(points: RoutePoint[]) {
   }
 
   return totalMeters / 1000;
+}
+
+function nearestRouteDistanceMeters(location: Pick<RoutePoint, "lat" | "lng">, route: GpxRoute | null) {
+  if (!route || route.points.length === 0) return null;
+
+  return route.points.reduce((nearest, point) => Math.min(nearest, distanceMeters(location, point)), Infinity);
+}
+
+function escapeXml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function routeToGpx(route: GpxRoute) {
+  const waypoints = route.waypoints
+    .map((point) => `  <wpt lat="${point.lat}" lon="${point.lng}"><name>${escapeXml(point.name)}</name></wpt>`)
+    .join("\n");
+  const trackPoints = route.points
+    .map(
+      (point) =>
+        `      <trkpt lat="${point.lat}" lon="${point.lng}">${
+          point.ele === undefined ? "" : `<ele>${point.ele}</ele>`
+        }${point.time ? `<time>${escapeXml(point.time)}</time>` : ""}</trkpt>`
+    )
+    .join("\n");
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="RallyTrail" xmlns="http://www.topografix.com/GPX/1/1">
+${waypoints ? `${waypoints}\n` : ""}  <trk>
+    <name>${escapeXml(route.name)}</name>
+    <trkseg>
+${trackPoints}
+    </trkseg>
+  </trk>
+</gpx>`;
 }
 
 function estimateRouteMinutes(route: GpxRoute) {
@@ -532,6 +578,9 @@ export default function App() {
   const [pointError, setPointError] = useState<string | null>(null);
   const [mapPickMode, setMapPickMode] = useState(false);
   const [overviewRouteIds, setOverviewRouteIds] = useState<string[]>([]);
+  const [activeTrip, setActiveTrip] = useState<ActiveTrip | null>(null);
+  const [tripCodeInput, setTripCodeInput] = useState("");
+  const [tripMessage, setTripMessage] = useState<string | null>(null);
   const [countryFilter, setCountryFilter] = useState<"all" | RouteCountry>("all");
   const [routeTypeFilter, setRouteTypeFilter] = useState<"all" | RouteType>("all");
   const [query, setQuery] = useState("");
@@ -549,6 +598,7 @@ export default function App() {
   const [activePanel, setActivePanel] = useState<ActivePanel>("routes");
   const [sheetMode, setSheetMode] = useState<SheetMode>("half");
   const [livePanelOpen, setLivePanelOpen] = useState(false);
+  const [rideMode, setRideMode] = useState(false);
   const [zoomLevel, setZoomLevel] = useState(9);
   const [activeRouteDetailsOpen, setActiveRouteDetailsOpen] = useState(false);
   const [expandedRouteGroups, setExpandedRouteGroups] = useState<Record<string, boolean>>({});
@@ -700,6 +750,12 @@ export default function App() {
     return normalizeBearing(bearingDegrees(ownLocation, targetWaypoint));
   }, [ownLocation, targetWaypoint]);
 
+  const offRouteDistanceM = useMemo(
+    () => (ownLocation ? nearestRouteDistanceMeters(ownLocation, activeRoute) : null),
+    [activeRoute, ownLocation]
+  );
+  const offRouteWarning = rideMode && offRouteDistanceM !== null && offRouteDistanceM > 75;
+
   const addPlannerPoint = useCallback((lat: number, lng: number) => {
     setPlannerPoints((current) => [
       ...current,
@@ -752,19 +808,28 @@ export default function App() {
       return;
     }
 
+    if (!session?.user) {
+      setRoutes([]);
+      setOverviewRouteIds([]);
+      setActiveRouteId(null);
+      setRouteError(null);
+      return;
+    }
+
     setRoutesLoading(true);
     setRouteError(null);
 
     try {
-      const publicRoutes = await loadPublicRoutes();
+      const publicRoutes = await loadPublicRoutes({ tripId: activeTrip?.id });
       setRoutes(publicRoutes);
       setActiveRouteId((current) => current ?? publicRoutes[0]?.id ?? null);
+      setOverviewRouteIds((current) => current.filter((routeId) => publicRoutes.some((route) => route.id === routeId)));
     } catch (error) {
       setRouteError(error instanceof Error ? error.message : "Routes laden is mislukt.");
     } finally {
       setRoutesLoading(false);
     }
-  }, []);
+  }, [activeTrip?.id, session?.user]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -932,7 +997,7 @@ export default function App() {
     }
 
     let active = true;
-    const channel = client.channel(`trip:${TRIP_ID}`, {
+    const channel = client.channel(`trip:${activeTrip?.id ?? TRIP_ID}`, {
       config: {
         presence: {
           key: session.user.id
@@ -971,7 +1036,7 @@ export default function App() {
       client.removeChannel(channel);
       channelRef.current = null;
     };
-  }, [session]);
+  }, [activeTrip?.id, session]);
 
   useEffect(() => {
     if (!channelRef.current || !session?.user || !ownLocation || ownLocation.gpsQuality !== "good") return;
@@ -1021,6 +1086,103 @@ export default function App() {
   async function handleSignOut() {
     if (!supabase) return;
     await supabase.auth.signOut();
+    setActiveTrip(null);
+    setRoutes([]);
+    setOverviewRouteIds([]);
+    setActiveRouteId(null);
+  }
+
+  async function createTrip() {
+    if (!supabase || !session?.user) return;
+
+    setTripMessage("Groepsrit maken...");
+    const { data, error } = await supabase
+      .from("trips")
+      .insert({
+        owner_id: session.user.id,
+        name: `Groepsrit ${new Date().toLocaleDateString("nl-NL")}`,
+        active: true
+      })
+      .select("id,name,share_code")
+      .single();
+
+    if (error) {
+      setTripMessage(error.message);
+      return;
+    }
+
+    await supabase.from("trip_members").upsert(
+      {
+        trip_id: data.id,
+        user_id: session.user.id,
+        role: "owner"
+      },
+      { onConflict: "trip_id,user_id", ignoreDuplicates: true }
+    );
+
+    setActiveTrip({ id: data.id, name: data.name, shareCode: data.share_code });
+    setTripCodeInput(data.share_code);
+    setTripMessage(`Groepsrit actief. Code: ${data.share_code}`);
+    setRoutes([]);
+    setOverviewRouteIds([]);
+    setActiveRouteId(null);
+  }
+
+  async function joinTrip() {
+    if (!supabase || !session?.user) return;
+
+    const code = tripCodeInput.trim().toUpperCase();
+    if (!code) return;
+
+    setTripMessage("Groepsrit openen...");
+    const { data, error } = await supabase
+      .from("trips")
+      .select("id,name,share_code")
+      .eq("share_code", code)
+      .eq("active", true)
+      .single();
+
+    if (error || !data) {
+      setTripMessage(error?.message ?? "Groepsrit niet gevonden.");
+      return;
+    }
+
+    const { error: memberError } = await supabase.from("trip_members").upsert(
+      {
+        trip_id: data.id,
+        user_id: session.user.id,
+        role: "rider"
+      },
+      { onConflict: "trip_id,user_id", ignoreDuplicates: true }
+    );
+
+    if (memberError) {
+      setTripMessage(memberError.message);
+      return;
+    }
+
+    setActiveTrip({ id: data.id, name: data.name, shareCode: data.share_code });
+    setTripMessage("Groepsrit actief. Alleen routes van deze rit worden getoond.");
+    setRoutes([]);
+    setOverviewRouteIds([]);
+    setActiveRouteId(null);
+  }
+
+  function leaveTrip() {
+    setActiveTrip(null);
+    setTripMessage("Groepsrit verlaten.");
+    setRoutes([]);
+    setOverviewRouteIds([]);
+    setActiveRouteId(null);
+  }
+
+  async function exportActiveRoute() {
+    if (!activeRoute) return;
+
+    await Share.share({
+      title: `${activeRoute.name}.gpx`,
+      message: routeToGpx(activeRoute)
+    });
   }
 
   function centerOnOwnLocation() {
@@ -1301,12 +1463,22 @@ export default function App() {
         distance_km: Number(route.distanceKm.toFixed(3)),
         elevation_gain_m: Math.round(route.elevationGainM),
         elevation_loss_m: Math.round(route.elevationLossM),
-        is_public: true
+        is_public: !activeTrip
       })
       .select("id")
       .single();
 
     if (error) throw error;
+
+    if (activeTrip) {
+      const { error: tripRouteError } = await supabase.from("trip_routes").upsert({
+        trip_id: activeTrip.id,
+        route_id: data.id,
+        added_by: session.user.id
+      });
+
+      if (tripRouteError) throw tripRouteError;
+    }
 
     return {
       ...route,
@@ -1357,6 +1529,12 @@ export default function App() {
   }
 
   async function importGpxFile() {
+    if (!session?.user) {
+      Alert.alert("Login nodig", "Log eerst in om GPX-routes te importeren.");
+      setLivePanelOpen(true);
+      return;
+    }
+
     setRouteError(null);
     setGpxImporting(true);
 
@@ -1376,7 +1554,7 @@ export default function App() {
       const text = await response.text();
       const draftRoute = parseGpxRoute(text, asset.name || "route.gpx", {
         colorIndex: routes.length,
-        group: "Eigen offroad routes",
+        group: activeTrip ? "Groepsrit route" : "Eigen offroad routes",
         country: "Onbekend",
         routeType: "4x4"
       });
@@ -1643,6 +1821,16 @@ export default function App() {
         </View>
         <View style={styles.topActions}>
           <Pressable
+            style={[styles.rideButton, rideMode && styles.rideButtonActive, !activeRoute && styles.disabledButton]}
+            disabled={!activeRoute}
+            onPress={() => {
+              setRideMode((current) => !current);
+              setSheetMode("compact");
+            }}
+          >
+            <Text style={[styles.rideButtonText, rideMode && styles.rideButtonTextActive]}>Rij</Text>
+          </Pressable>
+          <Pressable
             style={[styles.recordButton, recordingActive && styles.recordButtonActive]}
             onPress={() => {
               if (recordingActive) {
@@ -1709,6 +1897,24 @@ export default function App() {
         </View>
       )}
 
+      {rideMode && activeRoute ? (
+        <View style={[styles.rideOverlay, offRouteWarning && styles.rideOverlayWarning]}>
+          <Text style={[styles.rideOverlayTitle, offRouteWarning && styles.rideOverlayTitleWarning]}>
+            {offRouteWarning ? "Van route" : "Rijmodus"}
+          </Text>
+          <Text style={styles.rideOverlayText}>
+            {offRouteDistanceM === null
+              ? "Wachten op GPS"
+              : offRouteDistanceM < 1000
+                ? `${Math.round(offRouteDistanceM)} m van route`
+                : `${formatKm(offRouteDistanceM / 1000)} km van route`}
+          </Text>
+          <Text style={styles.rideOverlayText}>
+            {ownLocation?.speedKmh === undefined ? locationMessage : `${Math.round(ownLocation.speedKmh)} km/u`}
+          </Text>
+        </View>
+      ) : null}
+
       <View style={styles.zoomControls}>
         <Pressable style={styles.zoomButton} onPress={() => void changeZoom(1)}>
           <Text style={styles.zoomButtonText}>+</Text>
@@ -1739,6 +1945,42 @@ export default function App() {
               <Pressable style={styles.secondaryButton} onPress={handleSignOut}>
                 <Text style={styles.secondaryButtonText}>Uitloggen</Text>
               </Pressable>
+              <View style={styles.tripBox}>
+                <Text style={styles.routeName}>{activeTrip ? activeTrip.name : "Geen groepsrit actief"}</Text>
+                <Text style={styles.routeSub}>
+                  {activeTrip
+                    ? `Code ${activeTrip.shareCode} | alleen routes van deze rit`
+                    : "Maak of open een ritcode voor afgeschermde routes."}
+                </Text>
+                <TextInput
+                  value={tripCodeInput}
+                  onChangeText={(text) => setTripCodeInput(text.toUpperCase())}
+                  placeholder="Ritcode"
+                  placeholderTextColor="#6b7280"
+                  autoCapitalize="characters"
+                  style={styles.input}
+                />
+                <View style={styles.actionGrid}>
+                  <Pressable style={styles.secondaryButton} onPress={createTrip}>
+                    <Text style={styles.secondaryButtonText}>Nieuw</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.secondaryButton, !tripCodeInput.trim() && styles.disabledButton]}
+                    disabled={!tripCodeInput.trim()}
+                    onPress={joinTrip}
+                  >
+                    <Text style={styles.secondaryButtonText}>Join</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.secondaryButton, !activeTrip && styles.disabledButton]}
+                    disabled={!activeTrip}
+                    onPress={leaveTrip}
+                  >
+                    <Text style={styles.secondaryButtonText}>Uit</Text>
+                  </Pressable>
+                </View>
+                {tripMessage ? <Text style={styles.mutedText}>{tripMessage}</Text> : null}
+              </View>
             </>
           ) : (
             <>
@@ -1851,10 +2093,43 @@ export default function App() {
                       >
                         <Text style={styles.compactButtonText}>{gpxImporting ? "..." : "GPX"}</Text>
                       </Pressable>
+                      <Pressable
+                        style={[styles.compactButton, !activeRoute && styles.disabledButton]}
+                        disabled={!activeRoute}
+                        onPress={() => void exportActiveRoute()}
+                      >
+                        <Text style={styles.compactButtonText}>Delen</Text>
+                      </Pressable>
                     </View>
                   </View>
 
                   {routeError ? <Text style={styles.errorText}>{routeError}</Text> : null}
+
+                  {!session?.user ? (
+                    <View style={styles.lockedPanel}>
+                      <Text style={styles.routeName}>Login nodig</Text>
+                      <Text style={styles.routeSub}>
+                        Routes en groepsritten zijn alleen zichtbaar voor ingelogde rijders.
+                      </Text>
+                      <TextInput
+                        value={email}
+                        onChangeText={setEmail}
+                        autoCapitalize="none"
+                        keyboardType="email-address"
+                        placeholder="email@example.com"
+                        placeholderTextColor="#6b7280"
+                        style={styles.input}
+                      />
+                      <Pressable
+                        style={[styles.primaryButton, (!isSupabaseConfigured || !email.trim()) && styles.disabledButton]}
+                        disabled={!isSupabaseConfigured || !email.trim()}
+                        onPress={handleMagicLink}
+                      >
+                        <Text style={styles.primaryButtonText}>Stuur magic link</Text>
+                      </Pressable>
+                      {authMessage ? <Text style={styles.mutedText}>{authMessage}</Text> : null}
+                    </View>
+                  ) : null}
 
                   <TextInput
                     value={query}
@@ -2491,6 +2766,28 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 6
   },
+  rideButton: {
+    width: 40,
+    height: 40,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: "rgba(248, 250, 252, 0.18)",
+    backgroundColor: "rgba(15, 23, 42, 0.48)"
+  },
+  rideButtonActive: {
+    borderColor: "#f97316",
+    backgroundColor: "#f97316"
+  },
+  rideButtonText: {
+    color: "#f8fafc",
+    fontSize: 10,
+    fontWeight: "800"
+  },
+  rideButtonTextActive: {
+    color: "#111827"
+  },
   liveButton: {
     width: 40,
     height: 40,
@@ -2620,6 +2917,35 @@ const styles = StyleSheet.create({
   mapModeCancelText: {
     color: "#111827",
     fontWeight: "800"
+  },
+  rideOverlay: {
+    position: "absolute",
+    top: 152,
+    left: 16,
+    minWidth: 150,
+    gap: 2,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(15, 23, 42, 0.14)",
+    backgroundColor: "rgba(255, 255, 255, 0.96)",
+    paddingHorizontal: 12,
+    paddingVertical: 10
+  },
+  rideOverlayWarning: {
+    borderColor: "rgba(220, 38, 38, 0.38)",
+    backgroundColor: "rgba(254, 242, 242, 0.98)"
+  },
+  rideOverlayTitle: {
+    color: "#0f172a",
+    fontWeight: "800"
+  },
+  rideOverlayTitleWarning: {
+    color: "#b91c1c"
+  },
+  rideOverlayText: {
+    color: "#475569",
+    fontSize: 12,
+    marginTop: 2
   },
   zoomControls: {
     position: "absolute",
@@ -2907,6 +3233,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 10
   },
+  lockedPanel: {
+    gap: 10,
+    marginTop: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    backgroundColor: "#fff",
+    padding: 12
+  },
   activeCard: {
     marginTop: 12,
     borderRadius: 14,
@@ -3122,6 +3457,14 @@ const styles = StyleSheet.create({
   mapPointPanel: {
     gap: 10,
     marginTop: 14,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    backgroundColor: "#fff",
+    padding: 12
+  },
+  tripBox: {
+    gap: 8,
     borderRadius: 14,
     borderWidth: 1,
     borderColor: "#e2e8f0",

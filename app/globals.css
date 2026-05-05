@@ -164,6 +164,41 @@ button {
   font-weight: 800;
 }
 
+.ride-overlay {
+  position: absolute;
+  top: 82px;
+  right: 16px;
+  z-index: 5;
+  display: grid;
+  gap: 2px;
+  min-width: 160px;
+  padding: 10px 12px;
+  border: 1px solid rgba(15, 23, 42, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(14px);
+}
+
+.ride-overlay strong {
+  font-size: 0.9rem;
+}
+
+.ride-overlay span,
+.ride-overlay small {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.ride-overlay.warning {
+  border-color: rgba(220, 38, 38, 0.36);
+  background: rgba(254, 242, 242, 0.96);
+}
+
+.ride-overlay.warning strong {
+  color: #b91c1c;
+}
+
 .sidebar {
   position: absolute;
   top: 88px;
@@ -304,6 +339,10 @@ h2 {
   gap: 8px;
 }
 
+.auth-form.stacked {
+  display: grid;
+}
+
 .search-field {
   flex: 0 0 auto;
   min-height: 42px;
@@ -322,6 +361,37 @@ h2 {
   outline: 0;
   background: transparent;
   color: var(--text);
+}
+
+.locked-panel,
+.trip-box {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.locked-panel svg {
+  color: var(--accent-dark);
+}
+
+.locked-panel strong,
+.trip-box strong {
+  display: block;
+}
+
+.locked-panel span,
+.trip-box small {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.trip-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .field {

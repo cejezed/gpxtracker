@@ -16,6 +16,10 @@ type RouteRecord = {
   elevation_loss_m: number | string | null;
 };
 
+type LoadRoutesOptions = {
+  tripId?: string | null;
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -160,14 +164,36 @@ function routeFromRecord(record: RouteRecord, index: number): GpxRoute | null {
   };
 }
 
-export async function loadPublicSupabaseRoutes() {
+async function routeIdsForTrip(tripId: string) {
   const supabase = getSupabaseBrowserClient();
   if (!supabase) return [];
+
+  const { data, error } = await supabase.from("trip_routes").select("route_id").eq("trip_id", tripId);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data ?? []).map((record) => record.route_id).filter((routeId): routeId is string => Boolean(routeId));
+}
+
+export async function loadPublicSupabaseRoutes(options: LoadRoutesOptions = {}) {
+  const supabase = getSupabaseBrowserClient();
+  if (!supabase) return [];
+
+  const {
+    data: { user }
+  } = await supabase.auth.getUser();
+
+  if (!user) return [];
+
+  const tripRouteIds = options.tripId ? await routeIdsForTrip(options.tripId) : null;
+  if (tripRouteIds && tripRouteIds.length === 0) return [];
 
   const { data, error } = await supabase
     .from("routes")
     .select("id,name,country,route_type,route_group,file_name,geojson,distance_km,elevation_gain_m,elevation_loss_m")
-    .eq("is_public", true)
+    .or(options.tripId ? `id.in.(${tripRouteIds!.join(",")})` : `is_public.eq.true,owner_id.eq.${user.id}`)
     .order("country", { ascending: true })
     .order("route_group", { ascending: true })
     .order("name", { ascending: true });

@@ -51,6 +51,12 @@ const COUNTRIES: Array<"all" | RouteCountry> = ["all", "Engeland", "Duitsland"];
 type ActivePanel = "routes" | "plan" | "builder" | "record";
 type MobileSheetMode = "compact" | "half" | "expanded";
 
+type ActiveTrip = {
+  id: string;
+  name: string;
+  shareCode: string;
+};
+
 type DayPlanItem = {
   id: string;
   routeId: string;
@@ -250,6 +256,53 @@ function connectionDistanceKm(previous: GpxRoute, next: GpxRoute) {
   return distanceKmBetween(previousEnd, nextStart);
 }
 
+function distanceMetersBetween(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
+  return distanceKmBetween(a, b) * 1000;
+}
+
+function nearestRouteDistanceMeters(location: { lat: number; lng: number }, route: GpxRoute | null) {
+  if (!route || route.points.length === 0) return null;
+
+  return route.points.reduce((nearest, point) => Math.min(nearest, distanceMetersBetween(location, point)), Infinity);
+}
+
+function escapeXml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function routeToGpx(route: GpxRoute) {
+  const trackPoints = route.points
+    .map(
+      (point) =>
+        `      <trkpt lat="${point.lat}" lon="${point.lng}">${
+          point.ele === undefined ? "" : `<ele>${point.ele}</ele>`
+        }${point.time ? `<time>${escapeXml(point.time)}</time>` : ""}</trkpt>`
+    )
+    .join("\n");
+  const waypoints = route.waypoints
+    .map(
+      (point) =>
+        `  <wpt lat="${point.lat}" lon="${point.lng}"><name>${escapeXml(point.name)}</name></wpt>`
+    )
+    .join("\n");
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="RallyTrail" xmlns="http://www.topografix.com/GPX/1/1">
+${waypoints ? `${waypoints}\n` : ""}  <trk>
+    <name>${escapeXml(route.name)}</name>
+    <trkseg>
+${trackPoints}
+    </trkseg>
+  </trk>
+</gpx>
+`;
+}
+
 function orderByNearestConnection(routes: GpxRoute[]) {
   if (routes.length <= 2) return routes;
 
@@ -403,6 +456,9 @@ export function TrackerApp() {
   const [mobileSheetMode, setMobileSheetMode] = useState<MobileSheetMode>("half");
   const [mobileLiveOpen, setMobileLiveOpen] = useState(false);
   const [overviewRouteIds, setOverviewRouteIds] = useState<string[]>([]);
+  const [activeTrip, setActiveTrip] = useState<ActiveTrip | null>(null);
+  const [tripCodeInput, setTripCodeInput] = useState("");
+  const [tripMessage, setTripMessage] = useState<string | null>(null);
   const [countryFilter, setCountryFilter] = useState<"all" | RouteCountry>("all");
   const [routeTypeFilter, setRouteTypeFilter] = useState<"all" | RouteType>("all");
   const [activeRouteId, setActiveRouteId] = useState<string | null>(null);
@@ -412,6 +468,7 @@ export function TrackerApp() {
   const [loadingSupabaseRoutes, setLoadingSupabaseRoutes] = useState(false);
   const [supabaseRouteError, setSupabaseRouteError] = useState<string | null>(null);
   const [trackingEnabled, setTrackingEnabled] = useState(false);
+  const [rideMode, setRideMode] = useState(false);
   const [followOwnLocation, setFollowOwnLocation] = useState(true);
   const [displayName, setDisplayName] = useState("Rijder 1");
   const [email, setEmail] = useState("");
@@ -455,9 +512,25 @@ export function TrackerApp() {
         : activePanel === "record" && recordingDraftRoute
           ? [recordingDraftRoute]
           : overviewRoutes;
+  const {
+    supabaseConfigured,
+    user,
+    ownLocation,
+    remoteRiders,
+    error: locationError,
+    demoEnabled,
+    setDemoEnabled
+  } = useLiveLocation({
+    enabled: trackingEnabled,
+    route: activeRoute,
+    tripId: activeTrip?.id ?? TRIP_ID,
+    displayName,
+    color: "#2563eb"
+  });
+  const availableSamples = useMemo(() => (user && !activeTrip ? sampleRoutes : []), [activeTrip, user]);
   const filteredSamples = useMemo(
     () =>
-      sampleRoutes.filter((route) =>
+      availableSamples.filter((route) =>
         routeMatchesFilters(
           { ...route, name: route.title },
           query,
@@ -465,7 +538,7 @@ export function TrackerApp() {
           routeTypeFilter
         )
       ),
-    [countryFilter, query, routeTypeFilter]
+    [availableSamples, countryFilter, query, routeTypeFilter]
   );
   const filteredRoutes = useMemo(
     () => routes.filter((route) => routeMatchesFilters(route, query, countryFilter, routeTypeFilter)),
@@ -476,13 +549,13 @@ export function TrackerApp() {
   const routeTypeCounts = useMemo(
     () => ({
       "4x4":
-        sampleRoutes.filter((route) => route.routeType === "4x4").length +
+        availableSamples.filter((route) => route.routeType === "4x4").length +
         routes.filter((route) => route.routeType === "4x4").length,
       roadtrip:
-        sampleRoutes.filter((route) => route.routeType === "roadtrip").length +
+        availableSamples.filter((route) => route.routeType === "roadtrip").length +
         routes.filter((route) => route.routeType === "roadtrip").length
     }),
-    [routes]
+    [availableSamples, routes]
   );
   const planStats = useMemo(() => {
     const driveMinutes = plannedRoutes.reduce((total, route) => total + estimateRouteMinutes(route), 0);
@@ -517,21 +590,11 @@ export function TrackerApp() {
     [overviewConnections, overviewRoutes]
   );
 
-  const {
-    supabaseConfigured,
-    user,
-    ownLocation,
-    remoteRiders,
-    error: locationError,
-    demoEnabled,
-    setDemoEnabled
-  } = useLiveLocation({
-    enabled: trackingEnabled,
-    route: activeRoute,
-    tripId: TRIP_ID,
-    displayName,
-    color: "#2563eb"
-  });
+  const offRouteDistanceM = useMemo(
+    () => (ownLocation ? nearestRouteDistanceMeters(ownLocation, activeRoute) : null),
+    [activeRoute, ownLocation]
+  );
+  const offRouteWarning = rideMode && offRouteDistanceM !== null && offRouteDistanceM > 75;
 
   useEffect(() => {
     return () => {
@@ -545,12 +608,20 @@ export function TrackerApp() {
     let cancelled = false;
 
     async function loadRoutes() {
+      if (!user) {
+        setRoutes((current) => current.filter((route) => route.source !== "supabase" && route.source !== "sample"));
+        setOverviewRouteIds([]);
+        setActiveRouteId(null);
+        setLoadingSupabaseRoutes(false);
+        return;
+      }
+
       setLoadingSupabaseRoutes(true);
       setSupabaseRouteError(null);
 
       try {
-        const supabaseRoutes = await loadPublicSupabaseRoutes();
-        if (cancelled || supabaseRoutes.length === 0) return;
+        const supabaseRoutes = await loadPublicSupabaseRoutes({ tripId: activeTrip?.id });
+        if (cancelled) return;
 
         setRoutes((current) => {
           const localRoutes = current.filter((route) => route.source !== "supabase");
@@ -559,6 +630,8 @@ export function TrackerApp() {
 
           return [...nextSupabaseRoutes, ...localRoutes];
         });
+        setOverviewRouteIds((current) => current.filter((routeId) => supabaseRoutes.some((route) => route.id === routeId)));
+        setActiveRouteId((current) => current ?? supabaseRoutes[0]?.id ?? null);
       } catch (error) {
         if (!cancelled) {
           setSupabaseRouteError(error instanceof Error ? error.message : "Routes uit Supabase konden niet laden.");
@@ -575,7 +648,7 @@ export function TrackerApp() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [activeTrip?.id, user]);
 
   function isMobileViewport() {
     return typeof window !== "undefined" && window.matchMedia("(max-width: 760px)").matches;
@@ -688,18 +761,131 @@ export function TrackerApp() {
         distance_km: Number(route.distanceKm.toFixed(3)),
         elevation_gain_m: Math.round(route.elevationGainM),
         elevation_loss_m: Math.round(route.elevationLossM),
-        is_public: true
+        is_public: !activeTrip
       })
       .select("id")
       .single();
 
     if (error) throw error;
 
-    return {
+    const savedRoute = {
       ...route,
       id: data.id,
       source: "supabase" as const
     };
+
+    if (activeTrip) {
+      const { error: tripRouteError } = await supabase.from("trip_routes").upsert({
+        trip_id: activeTrip.id,
+        route_id: data.id,
+        added_by: user.id
+      });
+
+      if (tripRouteError) throw tripRouteError;
+    }
+
+    return savedRoute;
+  }
+
+  async function createTrip() {
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase || !user) return;
+
+    setTripMessage("Groepsrit maken...");
+
+    const { data, error } = await supabase
+      .from("trips")
+      .insert({
+        owner_id: user.id,
+        name: `Groepsrit ${new Date().toLocaleDateString("nl-NL")}`,
+        active: true
+      })
+      .select("id,name,share_code")
+      .single();
+
+    if (error) {
+      setTripMessage(error.message);
+      return;
+    }
+
+    await supabase.from("trip_members").upsert(
+      {
+        trip_id: data.id,
+        user_id: user.id,
+        role: "owner"
+      },
+      { onConflict: "trip_id,user_id", ignoreDuplicates: true }
+    );
+
+    setActiveTrip({ id: data.id, name: data.name, shareCode: data.share_code });
+    setTripCodeInput(data.share_code);
+    setTripMessage(`Groepsrit actief. Code: ${data.share_code}`);
+    setRoutes([]);
+    setOverviewRouteIds([]);
+    setActiveRouteId(null);
+    setTrackingEnabled(true);
+  }
+
+  async function joinTrip() {
+    const supabase = getSupabaseBrowserClient();
+    const code = tripCodeInput.trim().toUpperCase();
+    if (!supabase || !user || !code) return;
+
+    setTripMessage("Groepsrit openen...");
+
+    const { data, error } = await supabase
+      .from("trips")
+      .select("id,name,share_code")
+      .eq("share_code", code)
+      .eq("active", true)
+      .single();
+
+    if (error || !data) {
+      setTripMessage(error?.message ?? "Groepsrit niet gevonden.");
+      return;
+    }
+
+    const { error: memberError } = await supabase.from("trip_members").upsert(
+      {
+        trip_id: data.id,
+        user_id: user.id,
+        role: "rider"
+      },
+      { onConflict: "trip_id,user_id", ignoreDuplicates: true }
+    );
+
+    if (memberError) {
+      setTripMessage(memberError.message);
+      return;
+    }
+
+    setActiveTrip({ id: data.id, name: data.name, shareCode: data.share_code });
+    setTripMessage(`Groepsrit actief. Alleen routes van deze rit worden getoond.`);
+    setRoutes([]);
+    setOverviewRouteIds([]);
+    setActiveRouteId(null);
+    setTrackingEnabled(true);
+  }
+
+  function leaveTrip() {
+    setActiveTrip(null);
+    setTripMessage("Groepsrit verlaten. Je ziet weer je eigen/beschikbare routes.");
+    setRoutes([]);
+    setOverviewRouteIds([]);
+    setActiveRouteId(null);
+  }
+
+  function exportActiveRoute() {
+    if (!activeRoute) return;
+
+    const gpx = routeToGpx(activeRoute);
+    const blob = new Blob([gpx], { type: "application/gpx+xml" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${activeRoute.name.replace(/[^\w-]+/g, "-").replace(/^-|-$/g, "") || "rallytrail-route"}.gpx`;
+    link.click();
+    URL.revokeObjectURL(url);
   }
 
   function addRoutesToPlan(routesToAdd: GpxRoute[]) {
@@ -1175,11 +1361,21 @@ export function TrackerApp() {
     setRouteError(null);
 
     try {
+      if (!user) {
+        setRouteError("Log eerst in om GPX-routes te importeren.");
+        return;
+      }
+
       const text = await file.text();
-      const route = await addRouteFromText(text, file.name, "upload", {
+      const parsedRoute = parseGpxRoute(text, file.name, "upload", {
+        colorIndex: routes.length,
+        group: activeTrip ? "Groepsrit route" : undefined,
         country: "Onbekend",
         routeType: "4x4"
       });
+      const route = await saveRouteToSupabase(parsedRoute);
+      upsertRoute(route);
+      setOverviewRouteIds((current) => (current.includes(route.id) ? current : [route.id, ...current]));
       setActiveRouteId(route.id);
     } catch (error) {
       setRouteError(error instanceof Error ? error.message : "GPX import is mislukt.");
@@ -1267,6 +1463,21 @@ export function TrackerApp() {
         <div className="topbar-actions">
           <button
             type="button"
+            className={rideMode ? "control active" : "control"}
+            onClick={() => {
+              setRideMode((value) => !value);
+              setTrackingEnabled(true);
+              setFollowOwnLocation(true);
+              if (isMobileViewport()) setMobileSheetMode("compact");
+            }}
+            disabled={!activeRoute}
+            title="Rijmodus"
+          >
+            <Gauge size={18} aria-hidden />
+            <span>Rijden</span>
+          </button>
+          <button
+            type="button"
             className={trackingEnabled ? "control active" : "control"}
             onClick={() => setTrackingEnabled((value) => !value)}
             title="Live tracking"
@@ -1298,6 +1509,20 @@ export function TrackerApp() {
           >
             Annuleer
           </button>
+        </div>
+      )}
+
+      {rideMode && activeRoute && (
+        <div className={offRouteWarning ? "ride-overlay warning" : "ride-overlay"}>
+          <strong>{offRouteWarning ? "Van route" : "Rijmodus"}</strong>
+          <span>
+            {offRouteDistanceM === null
+              ? "Wachten op GPS"
+              : offRouteDistanceM < 1000
+                ? `${Math.round(offRouteDistanceM)} m van route`
+                : `${formatKm(offRouteDistanceM / 1000)} km van route`}
+          </span>
+          {ownLocation?.speedKmh ? <small>{Math.round(ownLocation.speedKmh)} km/u</small> : null}
         </div>
       )}
 
@@ -1370,9 +1595,19 @@ export function TrackerApp() {
               type="button"
               className="icon-button"
               onClick={() => fileInputRef.current?.click()}
+              disabled={!user}
               title="GPX importeren"
             >
               <FileUp size={18} aria-hidden />
+            </button>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={exportActiveRoute}
+              disabled={!activeRoute}
+              title="Actieve route exporteren"
+            >
+              <ArrowDown size={18} aria-hidden />
             </button>
             <input ref={fileInputRef} type="file" accept=".gpx,application/gpx+xml" hidden onChange={handleUpload} />
           </div>
@@ -1414,6 +1649,22 @@ export function TrackerApp() {
 
           {activePanel === "routes" ? (
             <div className="routes-scroll">
+              {!user ? (
+                <div className="locked-panel">
+                  <LogIn size={22} aria-hidden />
+                  <strong>Login nodig</strong>
+                  <span>Routes en groepsritten zijn alleen zichtbaar voor ingelogde rijders.</span>
+                  <div className="auth-form stacked">
+                    <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="email@domein.nl" />
+                    <button type="button" className="control active" onClick={handleMagicLink}>
+                      <LogIn size={16} aria-hidden />
+                      <span>Stuur magic link</span>
+                    </button>
+                  </div>
+                  {authMessage && <p className="muted-text">{authMessage}</p>}
+                </div>
+              ) : (
+                <>
               <label className="search-field">
                 <Search size={16} aria-hidden />
                 <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Zoek route" />
@@ -1626,6 +1877,8 @@ export function TrackerApp() {
 
               {routeError && <p className="error-text">{routeError}</p>}
               {supabaseRouteError && <p className="error-text">{supabaseRouteError}</p>}
+                </>
+              )}
             </div>
           ) : activePanel === "plan" ? (
             <div className="plan-view">
@@ -2121,6 +2374,42 @@ export function TrackerApp() {
 
           {authMessage && <p className="muted-text">{authMessage}</p>}
           {locationError && <p className="error-text">{locationError}</p>}
+
+          {user && (
+            <div className="trip-box">
+              <div>
+                <span className="section-label">Groepsrit</span>
+                <strong>{activeTrip ? activeTrip.name : "Geen groepsrit actief"}</strong>
+                <small>
+                  {activeTrip
+                    ? `Code ${activeTrip.shareCode} - routebibliotheek beperkt tot deze rit`
+                    : "Maak of open een ritcode voor afgeschermde routes."}
+                </small>
+              </div>
+              <div className="auth-form stacked">
+                <input
+                  value={tripCodeInput}
+                  onChange={(event) => setTripCodeInput(event.target.value.toUpperCase())}
+                  placeholder="Ritcode"
+                />
+                <div className="trip-actions">
+                  <button type="button" className="control" onClick={createTrip}>
+                    <Plus size={16} aria-hidden />
+                    <span>Nieuw</span>
+                  </button>
+                  <button type="button" className="control" onClick={joinTrip} disabled={!tripCodeInput.trim()}>
+                    <LogIn size={16} aria-hidden />
+                    <span>Join</span>
+                  </button>
+                  <button type="button" className="control" onClick={leaveTrip} disabled={!activeTrip}>
+                    <LogOut size={16} aria-hidden />
+                    <span>Uit</span>
+                  </button>
+                </div>
+              </div>
+              {tripMessage && <p className="muted-text">{tripMessage}</p>}
+            </div>
+          )}
 
           {activeRoute && (
             <div className="stats-grid">
