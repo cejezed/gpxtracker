@@ -45,6 +45,12 @@
           "locationWhenInUsePermission": "RallyTrail gebruikt je locatie om je positie op de route en in je live groep te tonen."
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "f47c9e15-6ef1-4bc0-ae3d-0271d474d6cd"
+      }
+    },
+    "owner": "cejezed"
   }
 }
