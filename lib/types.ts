@@ -23,6 +23,7 @@ export type GpxRoute = {
   country: RouteCountry;
   routeType: RouteType;
   fileName?: string;
+  isPublic?: boolean;
   color: string;
   points: RoutePoint[];
   waypoints: Waypoint[];

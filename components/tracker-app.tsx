@@ -16,6 +16,7 @@ import {
   Gauge,
   Layers3,
   LocateFixed,
+  Lock,
   LogIn,
   LogOut,
   ListChecks,
@@ -31,7 +32,10 @@ import {
   Search,
   Tent,
   Trash2,
+  Unlock,
   Utensils,
+  UserMinus,
+  UserPlus,
   Users,
   Wrench
 } from "lucide-react";
@@ -48,13 +52,27 @@ import { RouteMap } from "@/components/route-map";
 const TRIP_ID = "default-trip";
 const COUNTRIES: Array<"all" | RouteCountry> = ["all", "Engeland", "Duitsland"];
 
-type ActivePanel = "routes" | "plan" | "builder" | "record";
+type ActivePanel = "routes" | "plan" | "builder" | "record" | "manage";
 type MobileSheetMode = "compact" | "half" | "expanded";
 
 type ActiveTrip = {
   id: string;
   name: string;
   shareCode: string;
+};
+
+type TripMember = {
+  userId: string;
+  email: string;
+  role: string;
+  createdAt: string;
+};
+
+type TripMemberRecord = {
+  user_id: string;
+  email: string;
+  member_role: string;
+  created_at: string;
 };
 
 type DayPlanItem = {
@@ -222,6 +240,29 @@ function formatDuration(minutes: number) {
   if (hours === 0) return `${remainder} min`;
   if (remainder === 0) return `${hours} u`;
   return `${hours} u ${remainder} min`;
+}
+
+function normalizeTripMembers(data: unknown): TripMember[] {
+  if (!Array.isArray(data)) return [];
+
+  return (data as TripMemberRecord[])
+    .filter((member) => member.user_id && member.email)
+    .map((member) => ({
+      userId: member.user_id,
+      email: member.email,
+      role: member.member_role,
+      createdAt: member.created_at
+    }));
+}
+
+async function loadTripMembers(tripId: string) {
+  const supabase = getSupabaseBrowserClient();
+  if (!supabase) return [];
+
+  const { data, error } = await supabase.rpc("list_trip_members", { p_trip_id: tripId });
+  if (error) throw new Error(error.message);
+
+  return normalizeTripMembers(data);
 }
 
 function addMinutesToTime(time: string, minutes: number) {
@@ -459,6 +500,11 @@ export function TrackerApp() {
   const [activeTrip, setActiveTrip] = useState<ActiveTrip | null>(null);
   const [tripCodeInput, setTripCodeInput] = useState("");
   const [tripMessage, setTripMessage] = useState<string | null>(null);
+  const [tripMembers, setTripMembers] = useState<TripMember[]>([]);
+  const [tripMembersLoading, setTripMembersLoading] = useState(false);
+  const [memberEmail, setMemberEmail] = useState("");
+  const [manageMessage, setManageMessage] = useState<string | null>(null);
+  const [routeVisibilitySaving, setRouteVisibilitySaving] = useState<string | null>(null);
   const [countryFilter, setCountryFilter] = useState<"all" | RouteCountry>("all");
   const [routeTypeFilter, setRouteTypeFilter] = useState<"all" | RouteType>("all");
   const [activeRouteId, setActiveRouteId] = useState<string | null>(null);
@@ -544,6 +590,7 @@ export function TrackerApp() {
     () => routes.filter((route) => routeMatchesFilters(route, query, countryFilter, routeTypeFilter)),
     [countryFilter, query, routeTypeFilter, routes]
   );
+  const manageableRoutes = useMemo(() => routes.filter((route) => route.source === "supabase"), [routes]);
   const groupedSamples = useMemo(() => groupSamples(filteredSamples), [filteredSamples]);
   const groupedRoutes = useMemo(() => groupRoutes(filteredRoutes), [filteredRoutes]);
   const routeTypeCounts = useMemo(
@@ -649,6 +696,36 @@ export function TrackerApp() {
       cancelled = true;
     };
   }, [activeTrip?.id, user]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadMembers() {
+      if (!user || !activeTrip) {
+        setTripMembers([]);
+        setTripMembersLoading(false);
+        return;
+      }
+
+      setTripMembersLoading(true);
+      try {
+        const members = await loadTripMembers(activeTrip.id);
+        if (!cancelled) setTripMembers(members);
+      } catch (error) {
+        if (!cancelled) {
+          setManageMessage(error instanceof Error ? error.message : "Leden konden niet worden geladen.");
+        }
+      } finally {
+        if (!cancelled) setTripMembersLoading(false);
+      }
+    }
+
+    loadMembers();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTrip, user]);
 
   function isMobileViewport() {
     return typeof window !== "undefined" && window.matchMedia("(max-width: 760px)").matches;
@@ -771,7 +848,8 @@ export function TrackerApp() {
     const savedRoute = {
       ...route,
       id: data.id,
-      source: "supabase" as const
+      source: "supabase" as const,
+      isPublic: !activeTrip
     };
 
     if (activeTrip) {
@@ -870,9 +948,101 @@ export function TrackerApp() {
   function leaveTrip() {
     setActiveTrip(null);
     setTripMessage("Groepsrit verlaten. Je ziet weer je eigen/beschikbare routes.");
+    setTripMembers([]);
+    setManageMessage(null);
     setRoutes([]);
     setOverviewRouteIds([]);
     setActiveRouteId(null);
+  }
+
+  async function refreshTripMemberList() {
+    if (!activeTrip) return;
+
+    setTripMembersLoading(true);
+    try {
+      setTripMembers(await loadTripMembers(activeTrip.id));
+    } catch (error) {
+      setManageMessage(error instanceof Error ? error.message : "Leden konden niet worden geladen.");
+    } finally {
+      setTripMembersLoading(false);
+    }
+  }
+
+  async function addTripMemberByEmail() {
+    const supabase = getSupabaseBrowserClient();
+    const trimmedEmail = memberEmail.trim();
+    if (!supabase || !activeTrip || !trimmedEmail) return;
+
+    setManageMessage("Lid toevoegen...");
+    const { error } = await supabase.rpc("add_trip_member_by_email", {
+      p_trip_id: activeTrip.id,
+      p_email: trimmedEmail,
+      p_role: "rider"
+    });
+
+    if (error) {
+      setManageMessage(error.message);
+      return;
+    }
+
+    setMemberEmail("");
+    setManageMessage(`${trimmedEmail} heeft toegang tot deze groepsrit.`);
+    await refreshTripMemberList();
+  }
+
+  async function removeTripMemberByEmail(emailToRemove: string) {
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase || !activeTrip) return;
+
+    setManageMessage("Lid verwijderen...");
+    const { error } = await supabase.rpc("remove_trip_member_by_email", {
+      p_trip_id: activeTrip.id,
+      p_email: emailToRemove
+    });
+
+    if (error) {
+      setManageMessage(error.message);
+      return;
+    }
+
+    setManageMessage(`${emailToRemove} heeft geen toegang meer tot deze groepsrit.`);
+    await refreshTripMemberList();
+  }
+
+  async function copyTripCode() {
+    if (!activeTrip) return;
+
+    try {
+      await navigator.clipboard.writeText(activeTrip.shareCode);
+      setManageMessage("Ritcode gekopieerd.");
+    } catch {
+      setManageMessage(`Ritcode: ${activeTrip.shareCode}`);
+    }
+  }
+
+  async function toggleRouteVisibility(route: GpxRoute) {
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase || !user || route.source !== "supabase") return;
+
+    const nextIsPublic = !(route.isPublic ?? false);
+    setRouteVisibilitySaving(route.id);
+    setManageMessage(nextIsPublic ? "Route publiek maken..." : "Route afschermen...");
+
+    const { error } = await supabase.from("routes").update({ is_public: nextIsPublic }).eq("id", route.id);
+
+    if (error) {
+      setManageMessage(error.message);
+      setRouteVisibilitySaving(null);
+      return;
+    }
+
+    setRoutes((current) =>
+      current.map((currentRoute) =>
+        currentRoute.id === route.id ? { ...currentRoute, isPublic: nextIsPublic } : currentRoute
+      )
+    );
+    setManageMessage(nextIsPublic ? "Route is publiek zichtbaar voor ingelogde rijders." : "Route is prive.");
+    setRouteVisibilitySaving(null);
   }
 
   function exportActiveRoute() {
@@ -1423,13 +1593,19 @@ export function TrackerApp() {
         title:
           activePanel === "routes"
             ? "Routes"
-            : activePanel === "plan"
-              ? "Dagschema"
-              : activePanel === "builder"
-                ? "Route maken"
+          : activePanel === "plan"
+            ? "Dagschema"
+            : activePanel === "builder"
+              ? "Route maken"
+              : activePanel === "manage"
+                ? "Beheer"
                 : "Opname",
         detail:
-          activePanel === "builder"
+          activePanel === "manage"
+            ? activeTrip
+              ? `${tripMembers.length} leden - ${routes.length} routes`
+              : "Geen groepsrit actief"
+            : activePanel === "builder"
             ? `${builderPoints.length} punten - ${formatKm(builderDirectDistanceKm)} km direct`
             : activePanel === "record"
               ? `${recordedPoints.length} punten - ${formatKm(recordedDistanceKm)} km`
@@ -1579,7 +1755,9 @@ export function TrackerApp() {
                     ? "Planning"
                     : activePanel === "builder"
                       ? "Route maken"
-                      : "Opname"}
+                      : activePanel === "manage"
+                        ? "Beheer"
+                        : "Opname"}
               </span>
               <h1>
                 {activePanel === "routes"
@@ -1588,7 +1766,9 @@ export function TrackerApp() {
                     ? "Dagschema"
                     : activePanel === "builder"
                       ? "Waypoints"
-                      : "Route opnemen"}
+                      : activePanel === "manage"
+                        ? "Toegang"
+                        : "Route opnemen"}
               </h1>
             </div>
             <button
@@ -1627,7 +1807,7 @@ export function TrackerApp() {
               onClick={() => openPanel("plan")}
             >
               <ListChecks size={16} aria-hidden />
-              <span>Dagschema</span>
+              <span>Dag</span>
             </button>
             <button
               type="button"
@@ -1644,6 +1824,14 @@ export function TrackerApp() {
             >
               <Activity size={16} aria-hidden />
               <span>Opname</span>
+            </button>
+            <button
+              type="button"
+              className={activePanel === "manage" ? "active" : ""}
+              onClick={() => openPanel("manage")}
+            >
+              <Users size={16} aria-hidden />
+              <span>Beheer</span>
             </button>
           </div>
 
@@ -2137,6 +2325,162 @@ export function TrackerApp() {
                     );
                   })}
                 </div>
+              )}
+            </div>
+          ) : activePanel === "manage" ? (
+            <div className="plan-view">
+              {!user ? (
+                <div className="locked-panel">
+                  <LogIn size={22} aria-hidden />
+                  <strong>Login nodig</strong>
+                  <span>Alleen ingelogde rijders kunnen route-toegang beheren.</span>
+                  <div className="auth-form stacked">
+                    <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="email@domein.nl" />
+                    <button type="button" className="control active" onClick={handleMagicLink}>
+                      <LogIn size={16} aria-hidden />
+                      <span>Stuur magic link</span>
+                    </button>
+                  </div>
+                  {authMessage && <p className="muted-text">{authMessage}</p>}
+                </div>
+              ) : (
+                <>
+                  <div className="map-point-panel">
+                    <div className="map-point-header">
+                      <div>
+                        <span className="section-label">Groepsrit</span>
+                        <strong>{activeTrip ? activeTrip.name : "Geen groepsrit actief"}</strong>
+                        <small>
+                          {activeTrip
+                            ? "Private routes in deze rit zijn zichtbaar voor ritleden."
+                            : "Maak een groepsrit of open een bestaande ritcode."}
+                        </small>
+                      </div>
+                      <Users size={18} aria-hidden />
+                    </div>
+
+                    {activeTrip ? (
+                      <div className="manage-code-row">
+                        <code>{activeTrip.shareCode}</code>
+                        <button type="button" className="control" onClick={copyTripCode}>
+                          <span>Kopieer code</span>
+                        </button>
+                      </div>
+                    ) : (
+                      <input
+                        value={tripCodeInput}
+                        onChange={(event) => setTripCodeInput(event.target.value.toUpperCase())}
+                        placeholder="Ritcode"
+                      />
+                    )}
+
+                    <div className="trip-actions">
+                      <button type="button" className="control" onClick={createTrip}>
+                        <Plus size={16} aria-hidden />
+                        <span>Nieuw</span>
+                      </button>
+                      <button type="button" className="control" onClick={joinTrip} disabled={!tripCodeInput.trim()}>
+                        <LogIn size={16} aria-hidden />
+                        <span>Join</span>
+                      </button>
+                      <button type="button" className="control" onClick={leaveTrip} disabled={!activeTrip}>
+                        <LogOut size={16} aria-hidden />
+                        <span>Uit</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {activeTrip && (
+                    <div className="map-point-panel">
+                      <div className="map-point-header">
+                        <div>
+                          <span className="section-label">Leden</span>
+                          <strong>{tripMembers.length} rijders met toegang</strong>
+                          <small>Voeg iemand toe met het e-mailadres waarmee die persoon inlogt.</small>
+                        </div>
+                        <UserPlus size={18} aria-hidden />
+                      </div>
+
+                      <div className="manage-member-form">
+                        <input
+                          value={memberEmail}
+                          onChange={(event) => setMemberEmail(event.target.value)}
+                          placeholder="rijder@email.nl"
+                        />
+                        <button type="button" className="control active" onClick={addTripMemberByEmail} disabled={!memberEmail.trim()}>
+                          <UserPlus size={16} aria-hidden />
+                          <span>Toevoegen</span>
+                        </button>
+                      </div>
+
+                      {tripMembersLoading && <p className="muted-text">Leden laden...</p>}
+                      {tripMembers.map((member) => (
+                        <div key={member.userId} className="manage-member-row">
+                          <span>
+                            <strong>{member.email}</strong>
+                            <small>{member.role === "owner" ? "Eigenaar" : "Rijder"}</small>
+                          </span>
+                          <button
+                            type="button"
+                            className="icon-button mini danger"
+                            onClick={() => removeTripMemberByEmail(member.email)}
+                            disabled={member.role === "owner"}
+                            title="Lid verwijderen"
+                          >
+                            <UserMinus size={15} aria-hidden />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="map-point-panel">
+                    <div className="map-point-header">
+                      <div>
+                        <span className="section-label">Routezichtbaarheid</span>
+                        <strong>{manageableRoutes.length} Supabase routes</strong>
+                        <small>
+                          Publiek is zichtbaar voor alle ingelogde rijders. Prive is alleen zichtbaar voor eigenaar en gekoppelde ritleden.
+                        </small>
+                      </div>
+                      <Lock size={18} aria-hidden />
+                    </div>
+
+                    {manageableRoutes.length === 0 ? (
+                      <p className="muted-text">Nog geen beheerbare routes geladen.</p>
+                    ) : (
+                      <div className="manage-route-list">
+                        {manageableRoutes.map((route) => {
+                          const isPublic = route.isPublic ?? false;
+                          const VisibilityIcon = isPublic ? Unlock : Lock;
+
+                          return (
+                            <div key={route.id} className="manage-route-row">
+                              <span className="route-color" style={{ background: route.color }} />
+                              <span>
+                                <strong>{route.name}</strong>
+                                <small>
+                                  {route.country} - {routeTypeLabel(route.routeType)} - {isPublic ? "Publiek" : "Prive"}
+                                </small>
+                              </span>
+                              <button
+                                type="button"
+                                className={isPublic ? "icon-button mini active" : "icon-button mini"}
+                                onClick={() => toggleRouteVisibility(route)}
+                                disabled={routeVisibilitySaving === route.id}
+                                title={isPublic ? "Maak route prive" : "Maak route publiek"}
+                              >
+                                <VisibilityIcon size={15} aria-hidden />
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  {(manageMessage || tripMessage) && <p className="muted-text">{manageMessage ?? tripMessage}</p>}
+                </>
               )}
             </div>
           ) : activePanel === "builder" ? (

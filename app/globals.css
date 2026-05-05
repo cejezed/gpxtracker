@@ -421,7 +421,7 @@ h2 {
 
 .view-tabs {
   flex: 0 0 auto;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   margin-bottom: 10px;
 }
 
@@ -430,13 +430,13 @@ h2 {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
+  gap: 5px;
   min-height: 34px;
   border: 0;
   border-radius: 7px;
   background: transparent;
   color: #475569;
-  font-size: 0.8rem;
+  font-size: 0.76rem;
   font-weight: 800;
 }
 
@@ -882,6 +882,88 @@ h2 {
 .map-point-header strong {
   display: block;
   font-size: 0.88rem;
+}
+
+.map-point-header small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.35;
+}
+
+.manage-code-row,
+.manage-member-form,
+.manage-route-row,
+.manage-member-row {
+  display: grid;
+  align-items: center;
+  gap: 8px;
+}
+
+.manage-code-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.manage-code-row code {
+  min-height: 40px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #111827;
+  color: #ffffff;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+}
+
+.manage-member-form {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.manage-member-form input,
+.map-point-panel > input {
+  min-width: 0;
+  min-height: 40px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  outline: 0;
+  background: #ffffff;
+  color: var(--text);
+}
+
+.manage-member-row {
+  grid-template-columns: minmax(0, 1fr) 40px;
+  min-height: 42px;
+  padding: 7px 0 0;
+  border-top: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.manage-member-row strong,
+.manage-member-row small,
+.manage-route-row strong,
+.manage-route-row small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.manage-member-row small,
+.manage-route-row small {
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.manage-route-list {
+  display: grid;
+  gap: 6px;
+}
+
+.manage-route-row {
+  grid-template-columns: 18px minmax(0, 1fr) 40px;
+  min-height: 46px;
+  padding: 6px 0;
+  border-top: 1px solid rgba(15, 23, 42, 0.08);
 }
 
 .map-point-type-grid {

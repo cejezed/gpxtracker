@@ -92,13 +92,27 @@ type PlannerPoint = RoutePoint & {
   name: string;
 };
 
-type ActivePanel = "routes" | "plan" | "planner" | "record";
+type ActivePanel = "routes" | "plan" | "planner" | "record" | "manage";
 type SheetMode = "compact" | "half" | "expanded";
 
 type ActiveTrip = {
   id: string;
   name: string;
   shareCode: string;
+};
+
+type TripMember = {
+  userId: string;
+  email: string;
+  role: string;
+  createdAt: string;
+};
+
+type TripMemberRecord = {
+  user_id: string;
+  email: string;
+  member_role: string;
+  created_at: string;
 };
 
 type DayPlanItem = {
@@ -564,6 +578,28 @@ function parseAuthParams(url: string) {
   return new URLSearchParams([query, fragment].filter(Boolean).join("&"));
 }
 
+function normalizeTripMembers(data: unknown): TripMember[] {
+  if (!Array.isArray(data)) return [];
+
+  return (data as TripMemberRecord[])
+    .filter((member) => member.user_id && member.email)
+    .map((member) => ({
+      userId: member.user_id,
+      email: member.email,
+      role: member.member_role,
+      createdAt: member.created_at
+    }));
+}
+
+async function loadTripMembers(tripId: string) {
+  if (!supabase) return [];
+
+  const { data, error } = await supabase.rpc("list_trip_members", { p_trip_id: tripId });
+  if (error) throw new Error(error.message);
+
+  return normalizeTripMembers(data);
+}
+
 export default function App() {
   const mapRef = useRef<MapRef>(null);
   const cameraRef = useRef<CameraRef>(null);
@@ -581,6 +617,11 @@ export default function App() {
   const [activeTrip, setActiveTrip] = useState<ActiveTrip | null>(null);
   const [tripCodeInput, setTripCodeInput] = useState("");
   const [tripMessage, setTripMessage] = useState<string | null>(null);
+  const [tripMembers, setTripMembers] = useState<TripMember[]>([]);
+  const [tripMembersLoading, setTripMembersLoading] = useState(false);
+  const [memberEmail, setMemberEmail] = useState("");
+  const [manageMessage, setManageMessage] = useState<string | null>(null);
+  const [routeVisibilitySaving, setRouteVisibilitySaving] = useState<string | null>(null);
   const [countryFilter, setCountryFilter] = useState<"all" | RouteCountry>("all");
   const [routeTypeFilter, setRouteTypeFilter] = useState<"all" | RouteType>("all");
   const [query, setQuery] = useState("");
@@ -840,6 +881,36 @@ export default function App() {
   }, [refreshRoutes]);
 
   useEffect(() => {
+    let cancelled = false;
+
+    async function refreshTripMembers() {
+      if (!session?.user || !activeTrip) {
+        setTripMembers([]);
+        setTripMembersLoading(false);
+        return;
+      }
+
+      setTripMembersLoading(true);
+      try {
+        const members = await loadTripMembers(activeTrip.id);
+        if (!cancelled) setTripMembers(members);
+      } catch (error) {
+        if (!cancelled) {
+          setManageMessage(error instanceof Error ? error.message : "Leden konden niet worden geladen.");
+        }
+      } finally {
+        if (!cancelled) setTripMembersLoading(false);
+      }
+    }
+
+    void refreshTripMembers();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTrip, session?.user]);
+
+  useEffect(() => {
     if (!supabase) return;
 
     supabase.auth.getSession().then(({ data }) => setSession(data.session ?? null));
@@ -1087,6 +1158,7 @@ export default function App() {
     if (!supabase) return;
     await supabase.auth.signOut();
     setActiveTrip(null);
+    setTripMembers([]);
     setRoutes([]);
     setOverviewRouteIds([]);
     setActiveRouteId(null);
@@ -1170,10 +1242,88 @@ export default function App() {
 
   function leaveTrip() {
     setActiveTrip(null);
+    setTripMembers([]);
+    setManageMessage(null);
     setTripMessage("Groepsrit verlaten.");
     setRoutes([]);
     setOverviewRouteIds([]);
     setActiveRouteId(null);
+  }
+
+  async function refreshTripMemberList() {
+    if (!activeTrip) return;
+
+    setTripMembersLoading(true);
+    try {
+      setTripMembers(await loadTripMembers(activeTrip.id));
+    } catch (error) {
+      setManageMessage(error instanceof Error ? error.message : "Leden konden niet worden geladen.");
+    } finally {
+      setTripMembersLoading(false);
+    }
+  }
+
+  async function addTripMemberByEmail() {
+    if (!supabase || !activeTrip || !memberEmail.trim()) return;
+
+    const trimmedEmail = memberEmail.trim();
+    setManageMessage("Lid toevoegen...");
+    const { error } = await supabase.rpc("add_trip_member_by_email", {
+      p_trip_id: activeTrip.id,
+      p_email: trimmedEmail,
+      p_role: "rider"
+    });
+
+    if (error) {
+      setManageMessage(error.message);
+      return;
+    }
+
+    setMemberEmail("");
+    setManageMessage(`${trimmedEmail} heeft toegang tot deze groepsrit.`);
+    await refreshTripMemberList();
+  }
+
+  async function removeTripMemberByEmail(emailToRemove: string) {
+    if (!supabase || !activeTrip) return;
+
+    setManageMessage("Lid verwijderen...");
+    const { error } = await supabase.rpc("remove_trip_member_by_email", {
+      p_trip_id: activeTrip.id,
+      p_email: emailToRemove
+    });
+
+    if (error) {
+      setManageMessage(error.message);
+      return;
+    }
+
+    setManageMessage(`${emailToRemove} heeft geen toegang meer tot deze groepsrit.`);
+    await refreshTripMemberList();
+  }
+
+  async function toggleRouteVisibility(route: GpxRoute) {
+    if (!supabase || !session?.user) return;
+
+    const nextIsPublic = !(route.isPublic ?? false);
+    setRouteVisibilitySaving(route.id);
+    setManageMessage(nextIsPublic ? "Route publiek maken..." : "Route afschermen...");
+
+    const { error } = await supabase.from("routes").update({ is_public: nextIsPublic }).eq("id", route.id);
+
+    if (error) {
+      setManageMessage(error.message);
+      setRouteVisibilitySaving(null);
+      return;
+    }
+
+    setRoutes((current) =>
+      current.map((currentRoute) =>
+        currentRoute.id === route.id ? { ...currentRoute, isPublic: nextIsPublic } : currentRoute
+      )
+    );
+    setManageMessage(nextIsPublic ? "Route is publiek zichtbaar." : "Route is prive.");
+    setRouteVisibilitySaving(null);
   }
 
   async function exportActiveRoute() {
@@ -1482,7 +1632,8 @@ export default function App() {
 
     return {
       ...route,
-      id: data.id
+      id: data.id,
+      isPublic: !activeTrip
     };
   }
 
@@ -1648,9 +1799,15 @@ export default function App() {
               ? "Dagschema"
               : activePanel === "planner"
                 ? "Route maken"
-                : "Opname",
+                : activePanel === "manage"
+                  ? "Beheer"
+                  : "Opname",
         detail:
-          activePanel === "plan"
+          activePanel === "manage"
+            ? activeTrip
+              ? `${tripMembers.length} leden | ${routeCount} routes`
+              : "Geen groepsrit actief"
+            : activePanel === "plan"
             ? `${dayPlanItems.length} etappes | ${mapPoints.length} punten`
             : activePanel === "planner"
               ? `${plannerPoints.length} waypoints | ${formatKm(plannerDistanceKm)} km direct`
@@ -2050,7 +2207,7 @@ export default function App() {
         {sheetMode !== "compact" ? (
           <>
             <View style={styles.panelTabs}>
-              {(["routes", "plan", "planner", "record"] as ActivePanel[]).map((panel) => (
+              {(["routes", "plan", "planner", "record", "manage"] as ActivePanel[]).map((panel) => (
             <Pressable
               key={panel}
               style={[styles.panelTab, activePanel === panel && styles.panelTabActive]}
@@ -2063,7 +2220,9 @@ export default function App() {
                     ? "Dag"
                     : panel === "planner"
                       ? "Maken"
-                      : "Opname"}
+                      : panel === "record"
+                        ? "Opname"
+                        : "Beheer"}
               </Text>
             </Pressable>
               ))}
@@ -2309,6 +2468,165 @@ export default function App() {
                       </View>
                     );
                   })}
+                </>
+              ) : null}
+
+              {activePanel === "manage" ? (
+                <>
+                  <View style={styles.sectionHeader}>
+                    <View>
+                      <Text style={styles.sectionTitle}>Beheer</Text>
+                      <Text style={styles.mutedText}>
+                        Bepaal welke ingelogde gebruikers routes van een groepsrit kunnen zien.
+                      </Text>
+                    </View>
+                  </View>
+
+                  {!session?.user ? (
+                    <View style={styles.lockedPanel}>
+                      <Text style={styles.routeName}>Login nodig</Text>
+                      <Text style={styles.routeSub}>Alleen ingelogde rijders kunnen route-toegang beheren.</Text>
+                      <TextInput
+                        value={email}
+                        onChangeText={setEmail}
+                        autoCapitalize="none"
+                        keyboardType="email-address"
+                        placeholder="email@example.com"
+                        placeholderTextColor="#6b7280"
+                        style={styles.input}
+                      />
+                      <Pressable
+                        style={[styles.primaryButton, (!isSupabaseConfigured || !email.trim()) && styles.disabledButton]}
+                        disabled={!isSupabaseConfigured || !email.trim()}
+                        onPress={handleMagicLink}
+                      >
+                        <Text style={styles.primaryButtonText}>Stuur magic link</Text>
+                      </Pressable>
+                    </View>
+                  ) : (
+                    <>
+                      <View style={styles.manageCard}>
+                        <Text style={styles.routeName}>{activeTrip ? activeTrip.name : "Geen groepsrit actief"}</Text>
+                        <Text style={styles.routeSub}>
+                          {activeTrip
+                            ? `Code ${activeTrip.shareCode} | private routes zijn zichtbaar voor ritleden`
+                            : "Maak een groepsrit of open een bestaande ritcode."}
+                        </Text>
+                        <TextInput
+                          value={tripCodeInput}
+                          onChangeText={(text) => setTripCodeInput(text.toUpperCase())}
+                          placeholder="Ritcode"
+                          placeholderTextColor="#6b7280"
+                          autoCapitalize="characters"
+                          style={styles.input}
+                        />
+                        <View style={styles.actionGrid}>
+                          <Pressable style={styles.secondaryButton} onPress={createTrip}>
+                            <Text style={styles.secondaryButtonText}>Nieuw</Text>
+                          </Pressable>
+                          <Pressable
+                            style={[styles.secondaryButton, !tripCodeInput.trim() && styles.disabledButton]}
+                            disabled={!tripCodeInput.trim()}
+                            onPress={joinTrip}
+                          >
+                            <Text style={styles.secondaryButtonText}>Join</Text>
+                          </Pressable>
+                          <Pressable
+                            style={[styles.secondaryButton, !activeTrip && styles.disabledButton]}
+                            disabled={!activeTrip}
+                            onPress={leaveTrip}
+                          >
+                            <Text style={styles.secondaryButtonText}>Uit</Text>
+                          </Pressable>
+                        </View>
+                      </View>
+
+                      {activeTrip ? (
+                        <View style={styles.manageCard}>
+                          <Text style={styles.routeName}>Leden</Text>
+                          <Text style={styles.routeSub}>{tripMembers.length} rijders met toegang</Text>
+                          <TextInput
+                            value={memberEmail}
+                            onChangeText={setMemberEmail}
+                            autoCapitalize="none"
+                            keyboardType="email-address"
+                            placeholder="rijder@email.nl"
+                            placeholderTextColor="#6b7280"
+                            style={styles.input}
+                          />
+                          <Pressable
+                            style={[styles.primaryButton, !memberEmail.trim() && styles.disabledButton]}
+                            disabled={!memberEmail.trim()}
+                            onPress={() => void addTripMemberByEmail()}
+                          >
+                            <Text style={styles.primaryButtonText}>Lid toevoegen</Text>
+                          </Pressable>
+                          {tripMembersLoading ? <ActivityIndicator color="#f97316" /> : null}
+                          {tripMembers.map((member) => (
+                            <View key={member.userId} style={styles.manageMemberRow}>
+                              <View style={styles.routeTextBlock}>
+                                <Text style={styles.routeName} numberOfLines={1}>
+                                  {member.email}
+                                </Text>
+                                <Text style={styles.routeSub}>{member.role === "owner" ? "Eigenaar" : "Rijder"}</Text>
+                              </View>
+                              <Pressable
+                                style={[styles.iconAction, member.role === "owner" && styles.disabledButton]}
+                                disabled={member.role === "owner"}
+                                onPress={() => void removeTripMemberByEmail(member.email)}
+                              >
+                                <Text style={styles.iconActionText}>Uit</Text>
+                              </Pressable>
+                            </View>
+                          ))}
+                        </View>
+                      ) : null}
+
+                      <View style={styles.manageCard}>
+                        <Text style={styles.routeName}>Routezichtbaarheid</Text>
+                        <Text style={styles.routeSub}>
+                          Publiek is zichtbaar voor alle ingelogde rijders. Prive is alleen zichtbaar voor eigenaar en gekoppelde ritleden.
+                        </Text>
+                        {routes.length === 0 ? (
+                          <Text style={styles.mutedText}>Nog geen routes geladen.</Text>
+                        ) : (
+                          routes.map((route) => {
+                            const isPublic = route.isPublic ?? false;
+
+                            return (
+                              <View key={route.id} style={styles.manageRouteRow}>
+                                <View style={[styles.routeColor, { backgroundColor: route.color }]} />
+                                <View style={styles.routeTextBlock}>
+                                  <Text style={styles.routeName} numberOfLines={1}>
+                                    {route.name}
+                                  </Text>
+                                  <Text style={styles.routeSub}>
+                                    {route.country} | {routeTypeLabel(route.routeType)} | {isPublic ? "Publiek" : "Prive"}
+                                  </Text>
+                                </View>
+                                <Pressable
+                                  style={[
+                                    styles.iconAction,
+                                    isPublic && styles.iconActionActive,
+                                    routeVisibilitySaving === route.id && styles.disabledButton
+                                  ]}
+                                  disabled={routeVisibilitySaving === route.id}
+                                  onPress={() => void toggleRouteVisibility(route)}
+                                >
+                                  <Text style={[styles.iconActionText, isPublic && styles.iconActionTextActive]}>
+                                    {isPublic ? "Open" : "Prive"}
+                                  </Text>
+                                </Pressable>
+                              </View>
+                            );
+                          })
+                        )}
+                      </View>
+                      {manageMessage || tripMessage ? (
+                        <Text style={styles.mutedText}>{manageMessage ?? tripMessage}</Text>
+                      ) : null}
+                    </>
+                  )}
                 </>
               ) : null}
 
@@ -3075,7 +3393,7 @@ const styles = StyleSheet.create({
   },
   panelTabs: {
     flexDirection: "row",
-    gap: 8,
+    gap: 4,
     marginBottom: 12
   },
   panelTab: {
@@ -3094,6 +3412,7 @@ const styles = StyleSheet.create({
   },
   panelTabText: {
     color: "#334155",
+    fontSize: 12,
     fontWeight: "800"
   },
   panelTabTextActive: {
@@ -3470,6 +3789,31 @@ const styles = StyleSheet.create({
     borderColor: "#e2e8f0",
     backgroundColor: "#fff",
     padding: 12
+  },
+  manageCard: {
+    gap: 10,
+    marginTop: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    backgroundColor: "#fff",
+    padding: 12
+  },
+  manageMemberRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    borderTopWidth: 1,
+    borderTopColor: "#e2e8f0",
+    paddingTop: 8
+  },
+  manageRouteRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    borderTopWidth: 1,
+    borderTopColor: "#e2e8f0",
+    paddingTop: 8
   },
   pointTypeGrid: {
     flexDirection: "row",

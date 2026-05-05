@@ -14,6 +14,7 @@ type RouteRecord = {
   distance_km: number | string | null;
   elevation_gain_m: number | string | null;
   elevation_loss_m: number | string | null;
+  is_public: boolean | null;
 };
 
 type LoadRoutesOptions = {
@@ -155,6 +156,7 @@ function routeFromRecord(record: RouteRecord, index: number): GpxRoute | null {
     country: normalizeCountry(record.country),
     routeType: normalizeRouteType(record.route_type),
     fileName: record.file_name ?? undefined,
+    isPublic: record.is_public ?? false,
     color: ROUTE_COLORS[index % ROUTE_COLORS.length],
     points: routePoints,
     waypoints: readWaypoints(properties.waypoints),
@@ -190,7 +192,7 @@ export async function loadPublicRoutes(options: LoadRoutesOptions = {}) {
 
   const { data, error } = await supabase
     .from("routes")
-    .select("id,name,country,route_type,route_group,file_name,geojson,distance_km,elevation_gain_m,elevation_loss_m")
+    .select("id,name,country,route_type,route_group,file_name,is_public,geojson,distance_km,elevation_gain_m,elevation_loss_m")
     .or(options.tripId ? `id.in.(${tripRouteIds!.join(",")})` : `is_public.eq.true,owner_id.eq.${user.id}`)
     .order("country", { ascending: true })
     .order("route_group", { ascending: true })
