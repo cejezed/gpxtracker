@@ -3,8 +3,8 @@ import "leaflet/dist/leaflet.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "GPX Tracker",
-  description: "GPX route viewer met live groepslocatie."
+  title: "RallyTrail",
+  description: "RallyTrail routeplanner met GPX-routes, live groepslocatie en route-opname."
 };
 
 export const viewport: Viewport = {

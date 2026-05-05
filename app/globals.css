@@ -1203,6 +1203,51 @@ h2 {
   }
 }
 
+.privacy-page {
+  min-height: 100dvh;
+  overflow-y: auto;
+  background: #f8fafc;
+  padding: 40px 18px;
+}
+
+.privacy-document {
+  width: min(820px, 100%);
+  margin: 0 auto;
+  padding: 28px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: var(--shadow);
+}
+
+.privacy-back {
+  display: inline-flex;
+  margin-bottom: 18px;
+  color: var(--accent-dark);
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.privacy-document h1 {
+  font-size: 2rem;
+}
+
+.privacy-document h2 {
+  margin-top: 24px;
+  font-size: 1.05rem;
+}
+
+.privacy-document p {
+  color: #475569;
+  line-height: 1.65;
+}
+
+.privacy-updated {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
 @media (max-width: 760px) {
   .topbar {
     top: 10px;
