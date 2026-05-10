@@ -641,6 +641,7 @@ export default function App() {
   const [sheetMode, setSheetMode] = useState<SheetMode>("half");
   const [livePanelOpen, setLivePanelOpen] = useState(false);
   const [rideMode, setRideMode] = useState(false);
+  const [followOwnLocation, setFollowOwnLocation] = useState(false);
   const [zoomLevel, setZoomLevel] = useState(9);
   const [activeRouteDetailsOpen, setActiveRouteDetailsOpen] = useState(false);
   const [expandedRouteGroups, setExpandedRouteGroups] = useState<Record<string, boolean>>({});
@@ -797,6 +798,7 @@ export default function App() {
     [activeRoute, ownLocation]
   );
   const offRouteWarning = rideMode && offRouteDistanceM !== null && offRouteDistanceM > 75;
+  const shouldFollowOwnLocation = rideMode || followOwnLocation;
 
   const addPlannerPoint = useCallback((lat: number, lng: number) => {
     setPlannerPoints((current) => [
@@ -1128,7 +1130,7 @@ export default function App() {
   }, [displayName, ownLocation, session?.user]);
 
   useEffect(() => {
-    if (visibleMapRoutes.length === 0 || !cameraRef.current) return;
+    if (visibleMapRoutes.length === 0 || !cameraRef.current || (shouldFollowOwnLocation && ownLocation)) return;
 
     const bounds = routeBounds(visibleMapRoutes.flatMap((route) => route.points));
     if (!Number.isFinite(bounds.west) || !Number.isFinite(bounds.south)) return;
@@ -1140,7 +1142,26 @@ export default function App() {
       duration: 700,
       easing: "ease"
     });
-  }, [sheetMode, visibleMapRoutes]);
+  }, [ownLocation, sheetMode, shouldFollowOwnLocation, visibleMapRoutes]);
+
+  useEffect(() => {
+    if (!shouldFollowOwnLocation || !ownLocation || mapPickMode || plannerEnabled) return;
+
+    const minimumZoom = ownLocation.gpsQuality === "good" ? 15 : 13;
+    cameraRef.current?.easeTo({
+      center: [ownLocation.lng, ownLocation.lat],
+      zoom: Math.max(zoomLevel, minimumZoom),
+      duration: 450,
+      easing: "ease"
+    });
+  }, [
+    mapPickMode,
+    ownLocation,
+    ownLocation?.gpsQuality,
+    plannerEnabled,
+    shouldFollowOwnLocation,
+    zoomLevel
+  ]);
 
   async function handleMagicLink() {
     if (!supabase || !email.trim()) return;
@@ -1367,6 +1388,8 @@ export default function App() {
       return;
     }
 
+    const nextFollow = rideMode ? true : !followOwnLocation;
+    setFollowOwnLocation(nextFollow);
     cameraRef.current?.easeTo({
       center: [ownLocation.lng, ownLocation.lat],
       zoom: ownLocation.gpsQuality === "good" ? 15 : 13,
@@ -2001,8 +2024,12 @@ export default function App() {
             style={[styles.rideButton, rideMode && styles.rideButtonActive, !activeRoute && styles.disabledButton]}
             disabled={!activeRoute}
             onPress={() => {
-              setRideMode((current) => !current);
-              setSheetMode("compact");
+              setRideMode((current) => {
+                const nextRideMode = !current;
+                setFollowOwnLocation(nextRideMode);
+                if (nextRideMode) setSheetMode("compact");
+                return nextRideMode;
+              });
             }}
           >
             <Text style={[styles.rideButtonText, rideMode && styles.rideButtonTextActive]}>Rij</Text>
@@ -2044,8 +2071,13 @@ export default function App() {
           >
             <Text style={[styles.liveButtonText, livePanelOpen && styles.liveButtonTextActive]}>Live</Text>
           </Pressable>
-          <Pressable style={styles.locationButton} onPress={centerOnOwnLocation}>
-            <Text style={styles.locationButtonText}>GPS</Text>
+          <Pressable
+            style={[styles.locationButton, shouldFollowOwnLocation && styles.locationButtonActive]}
+            onPress={centerOnOwnLocation}
+          >
+            <Text style={[styles.locationButtonText, shouldFollowOwnLocation && styles.locationButtonTextActive]}>
+              {shouldFollowOwnLocation ? "Volg" : "GPS"}
+            </Text>
           </Pressable>
         </View>
       </View>
@@ -3233,10 +3265,17 @@ const styles = StyleSheet.create({
     borderColor: "rgba(248, 250, 252, 0.18)",
     backgroundColor: "rgba(249, 115, 22, 0.82)"
   },
+  locationButtonActive: {
+    borderColor: "#38bdf8",
+    backgroundColor: "#38bdf8"
+  },
   locationButtonText: {
     color: "#111827",
     fontSize: 10,
     fontWeight: "800"
+  },
+  locationButtonTextActive: {
+    color: "#082f49"
   },
   gpsBadge: {
     position: "absolute",
