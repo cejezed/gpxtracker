@@ -518,6 +518,7 @@ export function TrackerApp() {
   const [followOwnLocation, setFollowOwnLocation] = useState(true);
   const [displayName, setDisplayName] = useState("Rijder 1");
   const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [authMessage, setAuthMessage] = useState<string | null>(null);
 
   const activeRoute = routes.find((route) => route.id === activeRouteId) ?? null;
@@ -573,7 +574,7 @@ export function TrackerApp() {
     displayName,
     color: "#2563eb"
   });
-  const availableSamples = useMemo(() => (user && !activeTrip ? sampleRoutes : []), [activeTrip, user]);
+  const availableSamples = useMemo(() => (!activeTrip ? sampleRoutes : []), [activeTrip]);
   const filteredSamples = useMemo(
     () =>
       availableSamples.filter((route) =>
@@ -655,14 +656,6 @@ export function TrackerApp() {
     let cancelled = false;
 
     async function loadRoutes() {
-      if (!user) {
-        setRoutes((current) => current.filter((route) => route.source !== "supabase" && route.source !== "sample"));
-        setOverviewRouteIds([]);
-        setActiveRouteId(null);
-        setLoadingSupabaseRoutes(false);
-        return;
-      }
-
       setLoadingSupabaseRoutes(true);
       setSupabaseRouteError(null);
 
@@ -1568,10 +1561,42 @@ export function TrackerApp() {
     setAuthMessage(error ? error.message : "Magic link verstuurd.");
   }
 
+  async function handlePasswordSignIn() {
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase || !email.trim() || !password) return;
+
+    const { error } = await supabase.auth.signInWithPassword({
+      email: email.trim(),
+      password
+    });
+
+    setAuthMessage(error ? error.message : "Ingelogd.");
+  }
+
+  async function handlePasswordSignUp() {
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase || !email.trim() || password.length < 6) {
+      setAuthMessage("Gebruik een e-mailadres en een wachtwoord van minimaal 6 tekens.");
+      return;
+    }
+
+    const { error } = await supabase.auth.signUp({
+      email: email.trim(),
+      password
+    });
+
+    setAuthMessage(error ? error.message : "Account gemaakt. Je bent ingelogd of moet je e-mail nog bevestigen.");
+  }
+
   async function handleSignOut() {
     const supabase = getSupabaseBrowserClient();
     if (!supabase) return;
     await supabase.auth.signOut();
+    setActiveTrip(null);
+    setTripMembers([]);
+    setRoutes([]);
+    setOverviewRouteIds([]);
+    setActiveRouteId(null);
   }
 
   const activeStats = activeRoute
@@ -1775,7 +1800,7 @@ export function TrackerApp() {
               type="button"
               className="icon-button"
               onClick={() => fileInputRef.current?.click()}
-              disabled={!user}
+              disabled={Boolean(activeTrip && !user)}
               title="GPX importeren"
             >
               <FileUp size={18} aria-hidden />
@@ -1837,22 +1862,14 @@ export function TrackerApp() {
 
           {activePanel === "routes" ? (
             <div className="routes-scroll">
-              {!user ? (
-                <div className="locked-panel">
-                  <LogIn size={22} aria-hidden />
-                  <strong>Login nodig</strong>
-                  <span>Routes en groepsritten zijn alleen zichtbaar voor ingelogde rijders.</span>
-                  <div className="auth-form stacked">
-                    <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="email@domein.nl" />
-                    <button type="button" className="control active" onClick={handleMagicLink}>
-                      <LogIn size={16} aria-hidden />
-                      <span>Stuur magic link</span>
-                    </button>
-                  </div>
-                  {authMessage && <p className="muted-text">{authMessage}</p>}
+              {!user && (
+                <div className="locked-panel compact">
+                  <Eye size={22} aria-hidden />
+                  <strong>Testmodus</strong>
+                  <span>Publieke routes zijn zichtbaar zonder login. Login is alleen nodig voor groepsritten, prive-routes en beheer.</span>
                 </div>
-              ) : (
-                <>
+              )}
+              <>
               <label className="search-field">
                 <Search size={16} aria-hidden />
                 <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Zoek route" />
@@ -2065,8 +2082,7 @@ export function TrackerApp() {
 
               {routeError && <p className="error-text">{routeError}</p>}
               {supabaseRouteError && <p className="error-text">{supabaseRouteError}</p>}
-                </>
-              )}
+              </>
             </div>
           ) : activePanel === "plan" ? (
             <div className="plan-view">
@@ -2336,10 +2352,22 @@ export function TrackerApp() {
                   <span>Alleen ingelogde rijders kunnen route-toegang beheren.</span>
                   <div className="auth-form stacked">
                     <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="email@domein.nl" />
-                    <button type="button" className="control active" onClick={handleMagicLink}>
-                      <LogIn size={16} aria-hidden />
-                      <span>Stuur magic link</span>
-                    </button>
+                    <input
+                      type="password"
+                      value={password}
+                      onChange={(event) => setPassword(event.target.value)}
+                      placeholder="Wachtwoord"
+                    />
+                    <div className="auth-actions">
+                      <button type="button" className="control active" onClick={handlePasswordSignIn}>
+                        <LogIn size={16} aria-hidden />
+                        <span>Login</span>
+                      </button>
+                      <button type="button" className="control" onClick={handlePasswordSignUp}>
+                        <Plus size={16} aria-hidden />
+                        <span>Nieuw</span>
+                      </button>
+                    </div>
                   </div>
                   {authMessage && <p className="muted-text">{authMessage}</p>}
                 </div>
@@ -2707,11 +2735,26 @@ export function TrackerApp() {
               </button>
             </div>
           ) : (
-            <div className="auth-form">
+            <div className="auth-form stacked">
               <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="email@domein.nl" />
-              <button type="button" className="control" onClick={handleMagicLink}>
-                <LogIn size={16} aria-hidden />
-                <span>Login</span>
+              <input
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="Wachtwoord"
+              />
+              <div className="auth-actions">
+                <button type="button" className="control active" onClick={handlePasswordSignIn}>
+                  <LogIn size={16} aria-hidden />
+                  <span>Login</span>
+                </button>
+                <button type="button" className="control" onClick={handlePasswordSignUp}>
+                  <Plus size={16} aria-hidden />
+                  <span>Nieuw</span>
+                </button>
+              </div>
+              <button type="button" className="plain-auth-button" onClick={handleMagicLink}>
+                Stuur magic link
               </button>
             </div>
           )}

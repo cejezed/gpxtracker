@@ -148,6 +148,7 @@ drop policy if exists "Users manage own profile" on public.profiles;
 drop policy if exists "Owners manage routes" on public.routes;
 drop policy if exists "Public routes are readable" on public.routes;
 drop policy if exists "Authenticated route access" on public.routes;
+drop policy if exists "Public and scoped route access" on public.routes;
 drop policy if exists "Trip members can read trips" on public.trips;
 drop policy if exists "Authenticated can find active trips" on public.trips;
 drop policy if exists "Owners manage trips" on public.trips;
@@ -173,9 +174,9 @@ create policy "Users manage own profile"
   using (auth.uid() = id)
   with check (auth.uid() = id);
 
-create policy "Authenticated route access"
+create policy "Public and scoped route access"
   on public.routes for select
-  to authenticated
+  to anon, authenticated
   using (
     is_public = true
     or auth.uid() = owner_id

@@ -631,6 +631,7 @@ export default function App() {
   const [routeError, setRouteError] = useState<string | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("Rijder");
   const [authMessage, setAuthMessage] = useState<string | null>(null);
   const [ownLocation, setOwnLocation] = useState<RiderLocation | null>(null);
@@ -849,7 +850,7 @@ export default function App() {
       return;
     }
 
-    if (!session?.user) {
+    if (!session?.user && activeTrip) {
       setRoutes([]);
       setOverviewRouteIds([]);
       setActiveRouteId(null);
@@ -1152,6 +1153,31 @@ export default function App() {
     });
 
     setAuthMessage(error ? error.message : "Magic link verstuurd.");
+  }
+
+  async function handlePasswordSignIn() {
+    if (!supabase || !email.trim() || !password) return;
+
+    const { error } = await supabase.auth.signInWithPassword({
+      email: email.trim(),
+      password
+    });
+
+    setAuthMessage(error ? error.message : "Ingelogd.");
+  }
+
+  async function handlePasswordSignUp() {
+    if (!supabase || !email.trim() || password.length < 6) {
+      setAuthMessage("Gebruik een e-mailadres en een wachtwoord van minimaal 6 tekens.");
+      return;
+    }
+
+    const { error } = await supabase.auth.signUp({
+      email: email.trim(),
+      password
+    });
+
+    setAuthMessage(error ? error.message : "Account gemaakt. Je bent ingelogd of moet je e-mail nog bevestigen.");
   }
 
   async function handleSignOut() {
@@ -1680,12 +1706,6 @@ export default function App() {
   }
 
   async function importGpxFile() {
-    if (!session?.user) {
-      Alert.alert("Login nodig", "Log eerst in om GPX-routes te importeren.");
-      setLivePanelOpen(true);
-      return;
-    }
-
     setRouteError(null);
     setGpxImporting(true);
 
@@ -2141,7 +2161,7 @@ export default function App() {
             </>
           ) : (
             <>
-              <Text style={styles.mutedText}>Login is nodig om je locatie te delen.</Text>
+              <Text style={styles.mutedText}>Publieke routes werken zonder login. Login is nodig voor groepsritten en live delen.</Text>
               <TextInput
                 value={email}
                 onChangeText={setEmail}
@@ -2151,12 +2171,39 @@ export default function App() {
                 placeholderTextColor="#6b7280"
                 style={styles.input}
               />
+              <TextInput
+                value={password}
+                onChangeText={setPassword}
+                secureTextEntry
+                placeholder="Wachtwoord"
+                placeholderTextColor="#6b7280"
+                style={styles.input}
+              />
+              <View style={styles.actionGrid}>
+                <Pressable
+                  style={[styles.primaryButton, (!isSupabaseConfigured || !email.trim() || !password) && styles.disabledButton]}
+                  disabled={!isSupabaseConfigured || !email.trim() || !password}
+                  onPress={handlePasswordSignIn}
+                >
+                  <Text style={styles.primaryButtonText}>Login</Text>
+                </Pressable>
+                <Pressable
+                  style={[
+                    styles.secondaryButton,
+                    (!isSupabaseConfigured || !email.trim() || password.length < 6) && styles.disabledButton
+                  ]}
+                  disabled={!isSupabaseConfigured || !email.trim() || password.length < 6}
+                  onPress={handlePasswordSignUp}
+                >
+                  <Text style={styles.secondaryButtonText}>Nieuw</Text>
+                </Pressable>
+              </View>
               <Pressable
-                style={[styles.primaryButton, (!isSupabaseConfigured || !email.trim()) && styles.disabledButton]}
+                style={[styles.secondaryButton, (!isSupabaseConfigured || !email.trim()) && styles.disabledButton]}
                 disabled={!isSupabaseConfigured || !email.trim()}
                 onPress={handleMagicLink}
               >
-                <Text style={styles.primaryButtonText}>Stuur magic link</Text>
+                <Text style={styles.secondaryButtonText}>Stuur magic link</Text>
               </Pressable>
             </>
           )}
@@ -2266,27 +2313,10 @@ export default function App() {
 
                   {!session?.user ? (
                     <View style={styles.lockedPanel}>
-                      <Text style={styles.routeName}>Login nodig</Text>
+                      <Text style={styles.routeName}>Testmodus</Text>
                       <Text style={styles.routeSub}>
-                        Routes en groepsritten zijn alleen zichtbaar voor ingelogde rijders.
+                        Publieke routes zijn zichtbaar zonder login. Login is alleen nodig voor groepsritten, prive-routes en beheer.
                       </Text>
-                      <TextInput
-                        value={email}
-                        onChangeText={setEmail}
-                        autoCapitalize="none"
-                        keyboardType="email-address"
-                        placeholder="email@example.com"
-                        placeholderTextColor="#6b7280"
-                        style={styles.input}
-                      />
-                      <Pressable
-                        style={[styles.primaryButton, (!isSupabaseConfigured || !email.trim()) && styles.disabledButton]}
-                        disabled={!isSupabaseConfigured || !email.trim()}
-                        onPress={handleMagicLink}
-                      >
-                        <Text style={styles.primaryButtonText}>Stuur magic link</Text>
-                      </Pressable>
-                      {authMessage ? <Text style={styles.mutedText}>{authMessage}</Text> : null}
                     </View>
                   ) : null}
 
@@ -2495,13 +2525,34 @@ export default function App() {
                         placeholderTextColor="#6b7280"
                         style={styles.input}
                       />
-                      <Pressable
-                        style={[styles.primaryButton, (!isSupabaseConfigured || !email.trim()) && styles.disabledButton]}
-                        disabled={!isSupabaseConfigured || !email.trim()}
-                        onPress={handleMagicLink}
-                      >
-                        <Text style={styles.primaryButtonText}>Stuur magic link</Text>
-                      </Pressable>
+                      <TextInput
+                        value={password}
+                        onChangeText={setPassword}
+                        secureTextEntry
+                        placeholder="Wachtwoord"
+                        placeholderTextColor="#6b7280"
+                        style={styles.input}
+                      />
+                      <View style={styles.actionGrid}>
+                        <Pressable
+                          style={[styles.primaryButton, (!isSupabaseConfigured || !email.trim() || !password) && styles.disabledButton]}
+                          disabled={!isSupabaseConfigured || !email.trim() || !password}
+                          onPress={handlePasswordSignIn}
+                        >
+                          <Text style={styles.primaryButtonText}>Login</Text>
+                        </Pressable>
+                        <Pressable
+                          style={[
+                            styles.secondaryButton,
+                            (!isSupabaseConfigured || !email.trim() || password.length < 6) && styles.disabledButton
+                          ]}
+                          disabled={!isSupabaseConfigured || !email.trim() || password.length < 6}
+                          onPress={handlePasswordSignUp}
+                        >
+                          <Text style={styles.secondaryButtonText}>Nieuw</Text>
+                        </Pressable>
+                      </View>
+                      {authMessage ? <Text style={styles.mutedText}>{authMessage}</Text> : null}
                     </View>
                   ) : (
                     <>

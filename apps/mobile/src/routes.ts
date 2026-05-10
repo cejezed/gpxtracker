@@ -185,18 +185,27 @@ export async function loadPublicRoutes(options: LoadRoutesOptions = {}) {
     data: { user }
   } = await supabase.auth.getUser();
 
-  if (!user) return [];
+  if (options.tripId && !user) return [];
 
   const tripRouteIds = options.tripId ? await routeIdsForTrip(options.tripId) : null;
   if (tripRouteIds && tripRouteIds.length === 0) return [];
 
-  const { data, error } = await supabase
+  let query = supabase
     .from("routes")
     .select("id,name,country,route_type,route_group,file_name,is_public,geojson,distance_km,elevation_gain_m,elevation_loss_m")
-    .or(options.tripId ? `id.in.(${tripRouteIds!.join(",")})` : `is_public.eq.true,owner_id.eq.${user.id}`)
     .order("country", { ascending: true })
     .order("route_group", { ascending: true })
     .order("name", { ascending: true });
+
+  if (options.tripId) {
+    query = query.or(`id.in.(${tripRouteIds!.join(",")})`);
+  } else if (user) {
+    query = query.or(`is_public.eq.true,owner_id.eq.${user.id}`);
+  } else {
+    query = query.eq("is_public", true);
+  }
+
+  const { data, error } = await query;
 
   if (error) {
     throw new Error(error.message);
