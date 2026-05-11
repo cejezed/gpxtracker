@@ -4,7 +4,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
-const IMPORT_DIR = path.join(process.cwd(), "imports");
+const IMPORT_ROOTS = ["imports", "Hochsauerland", "Wales"].map((directory) => path.join(process.cwd(), directory));
 const BUCKET = "gpx-routes";
 const DRY_RUN = process.argv.includes("--dry-run");
 const ROUTE_TYPES = new Set(["4x4", "roadtrip"]);
@@ -77,6 +77,19 @@ async function findGpxFiles(directory) {
   }
 
   return files.sort((a, b) => a.localeCompare(b));
+}
+
+function pathInsideRoot(filePath, rootPath) {
+  const relativePath = path.relative(rootPath, filePath);
+  return relativePath && !relativePath.startsWith("..") && !path.isAbsolute(relativePath);
+}
+
+function importRootFor(filePath) {
+  return IMPORT_ROOTS.find((rootPath) => pathInsideRoot(filePath, rootPath)) ?? IMPORT_ROOTS[0];
+}
+
+function relativeImportPath(filePath) {
+  return path.relative(importRootFor(filePath), filePath);
 }
 
 function titleCase(value) {
@@ -213,10 +226,19 @@ function fallbackName(fileName) {
 }
 
 function inferMetadata(filePath) {
-  const relativePath = path.relative(IMPORT_DIR, filePath);
-  const lower = relativePath.toLowerCase();
+  const rootPath = importRootFor(filePath);
+  const relativePath = relativeImportPath(filePath);
   const parts = relativePath.split(path.sep);
-  const group = parts.length > 1 ? titleCase(parts[0]) : "Import";
+  const rootName = path.basename(rootPath);
+  const lower = `${rootName} ${relativePath}`.toLowerCase();
+  const group =
+    parts.length > 1
+      ? titleCase(parts[0])
+      : /hochsauerland/i.test(rootName)
+        ? "Hoch Sauerland"
+        : /wales/i.test(rootName)
+          ? "Wales"
+          : "Import";
 
   let country = "Onbekend";
   if (/(duitsland|germany|hochsauerland)/.test(lower)) {
@@ -244,7 +266,7 @@ function inferMetadata(filePath) {
 }
 
 function storagePathFor(filePath, metadata) {
-  const relativePath = path.relative(IMPORT_DIR, filePath);
+  const relativePath = relativeImportPath(filePath);
   const parts = relativePath.split(path.sep).map((part) => slug(part) || "route");
 
   return [metadata.routeType, slug(metadata.country), ...parts].join("/");
@@ -375,9 +397,10 @@ async function importFile(supabase, filePath) {
 async function main() {
   await loadEnvFile(path.join(process.cwd(), ".env.local"));
 
-  const files = await findGpxFiles(IMPORT_DIR);
+  const nestedFiles = await Promise.all(IMPORT_ROOTS.map((rootPath) => findGpxFiles(rootPath)));
+  const files = nestedFiles.flat();
   if (files.length === 0) {
-    console.log("Geen GPX-bestanden gevonden in imports/.");
+    console.log("Geen GPX-bestanden gevonden in de importmappen.");
     return;
   }
 
