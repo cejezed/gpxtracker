@@ -11,6 +11,7 @@ import {
   type StyleSpecification,
   type ViewStateChangeEvent
 } from "@maplibre/maplibre-react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import type { RealtimeChannel, Session } from "@supabase/supabase-js";
 import * as DocumentPicker from "expo-document-picker";
 import * as Linking from "expo-linking";
@@ -52,6 +53,7 @@ const MODERATE_ACCURACY_M = 200;
 const COUNTRIES: Array<"all" | RouteCountry> = ["all", "Engeland", "Duitsland"];
 const REGION_ORDER = ["Lake District", "Wales", "Hoch Sauerland", "Eigen roadtrip routes", "Eigen offroad routes", "Opgenomen routes", "Overig"];
 const MAP_POINT_TYPES: MapPointType[] = ["overnight", "fuel", "food", "viewpoint", "repair", "note"];
+const ROUTE_CACHE_PREFIX = "rallytrail:routes:";
 
 const MAP_STYLE: StyleSpecification = {
   version: 8,
@@ -113,6 +115,11 @@ type TripMemberRecord = {
   email: string;
   member_role: string;
   created_at: string;
+};
+
+type CachedRoutes = {
+  routes: GpxRoute[];
+  cachedAt: string;
 };
 
 type DayPlanItem = {
@@ -600,6 +607,57 @@ async function loadTripMembers(tripId: string) {
   return normalizeTripMembers(data);
 }
 
+function routeCacheKey(tripId?: string | null) {
+  return `${ROUTE_CACHE_PREFIX}${tripId ?? "public"}`;
+}
+
+function isRouteArray(value: unknown): value is GpxRoute[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (route) =>
+        route &&
+        typeof route === "object" &&
+        typeof (route as GpxRoute).id === "string" &&
+        typeof (route as GpxRoute).name === "string" &&
+        Array.isArray((route as GpxRoute).points)
+    )
+  );
+}
+
+async function readCachedRoutes(tripId?: string | null): Promise<CachedRoutes | null> {
+  try {
+    const rawCache = await AsyncStorage.getItem(routeCacheKey(tripId));
+    if (!rawCache) return null;
+
+    const parsed = JSON.parse(rawCache) as Partial<CachedRoutes>;
+    if (!isRouteArray(parsed.routes) || !parsed.cachedAt) return null;
+
+    return {
+      routes: parsed.routes,
+      cachedAt: parsed.cachedAt
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function writeCachedRoutes(tripId: string | null | undefined, routes: GpxRoute[]) {
+  if (routes.length === 0) return;
+
+  try {
+    await AsyncStorage.setItem(
+      routeCacheKey(tripId),
+      JSON.stringify({
+        routes,
+        cachedAt: new Date().toISOString()
+      } satisfies CachedRoutes)
+    );
+  } catch {
+    // Cache is best-effort. Route loading should keep working if local storage is full.
+  }
+}
+
 export default function App() {
   const mapRef = useRef<MapRef>(null);
   const cameraRef = useRef<CameraRef>(null);
@@ -629,6 +687,7 @@ export default function App() {
   const [routesLoading, setRoutesLoading] = useState(false);
   const [gpxImporting, setGpxImporting] = useState(false);
   const [routeError, setRouteError] = useState<string | null>(null);
+  const [routeStatusMessage, setRouteStatusMessage] = useState<string | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -848,7 +907,16 @@ export default function App() {
 
   const refreshRoutes = useCallback(async () => {
     if (!isSupabaseConfigured) {
-      setRouteError("Supabase is nog niet ingesteld voor de native app.");
+      const cachedRoutes = await readCachedRoutes(activeTrip?.id);
+      if (cachedRoutes) {
+        setRoutes(cachedRoutes.routes);
+        setActiveRouteId((current) => current ?? cachedRoutes.routes[0]?.id ?? null);
+        setOverviewRouteIds((current) => current.filter((routeId) => cachedRoutes.routes.some((route) => route.id === routeId)));
+        setRouteError(null);
+        setRouteStatusMessage(`Offline routes geladen (${cachedRoutes.routes.length}).`);
+      } else {
+        setRouteError("Supabase is nog niet ingesteld voor de native app.");
+      }
       return;
     }
 
@@ -862,14 +930,27 @@ export default function App() {
 
     setRoutesLoading(true);
     setRouteError(null);
+    setRouteStatusMessage(null);
 
     try {
       const publicRoutes = await loadPublicRoutes({ tripId: activeTrip?.id });
       setRoutes(publicRoutes);
       setActiveRouteId((current) => current ?? publicRoutes[0]?.id ?? null);
       setOverviewRouteIds((current) => current.filter((routeId) => publicRoutes.some((route) => route.id === routeId)));
+      if (publicRoutes.length > 0) {
+        await writeCachedRoutes(activeTrip?.id, publicRoutes);
+      }
     } catch (error) {
-      setRouteError(error instanceof Error ? error.message : "Routes laden is mislukt.");
+      const cachedRoutes = await readCachedRoutes(activeTrip?.id);
+      if (cachedRoutes) {
+        setRoutes(cachedRoutes.routes);
+        setActiveRouteId((current) => current ?? cachedRoutes.routes[0]?.id ?? null);
+        setOverviewRouteIds((current) => current.filter((routeId) => cachedRoutes.routes.some((route) => route.id === routeId)));
+        setRouteError(null);
+        setRouteStatusMessage(`Geen internet/Supabase. ${cachedRoutes.routes.length} routes uit offline cache geladen.`);
+      } else {
+        setRouteError(error instanceof Error ? error.message : "Routes laden is mislukt.");
+      }
     } finally {
       setRoutesLoading(false);
     }
@@ -882,6 +963,11 @@ export default function App() {
 
     return () => clearTimeout(timer);
   }, [refreshRoutes]);
+
+  useEffect(() => {
+    if (routes.length === 0) return;
+    void writeCachedRoutes(activeTrip?.id, routes);
+  }, [activeTrip?.id, routes]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2342,6 +2428,7 @@ export default function App() {
                   </View>
 
                   {routeError ? <Text style={styles.errorText}>{routeError}</Text> : null}
+                  {routeStatusMessage ? <Text style={styles.mutedText}>{routeStatusMessage}</Text> : null}
 
                   {!session?.user ? (
                     <View style={styles.lockedPanel}>
